@@ -1,0 +1,30 @@
+# 环境变量文件（包含敏感信息）
+.env
+# Continue ignoring legacy local data during migration.
+.paicli/
+PAI.local.md
+.clix/*
+!.clix/
+!.clix/CLIX.md
+CLIX.local.md
+
+# 编译输出
+target/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 日志
+*.log
+
+# 操作系统
+.DS_Store
+Thumbs.db
+/reports
+temp_articles.json
+
+# Local copies preserved during project consolidation
+.clix-archive/

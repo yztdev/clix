@@ -1,0 +1,3 @@
+前台命令执行探针
+用途：验证 execute_command 的前台同步执行链路（非后台、非 nohup）
+目标命令：sleep 300
