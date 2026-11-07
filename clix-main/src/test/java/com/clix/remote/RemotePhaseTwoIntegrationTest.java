@@ -4,6 +4,7 @@ import com.clix.process.ActiveProcessSupervisor;
 import com.clix.process.CapabilityDetector;
 import com.clix.process.PlatformShell;
 import com.clix.process.ProcessContainment;
+import com.clix.process.SupervisorCommandRunner;
 import com.clix.process.FakeContainment;
 import com.clix.tool.PlatformCommandRunner;
 import org.junit.jupiter.api.Test;

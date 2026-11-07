@@ -9,9 +9,9 @@ import java.util.Map;
  * ToolRegistry：抽出平台进程启动和终止接口").
  *
  * <p>Returning {@code null} from {@link #execute} keeps ToolRegistry's built-in ProcessBuilder
- * path, which is what local (non-remote) mode still uses. A remote client installs a runner
- * backed by {@code ActiveProcessSupervisor}, so its commands are registered before launch and
- * terminated by the bounded containment-aware path.</p>
+ * compatibility path. Local Windows and remote clients may install a runner backed by
+ * {@code ActiveProcessSupervisor}, so commands are registered before launch and terminated by
+ * the bounded containment-aware path.</p>
  */
 public interface PlatformCommandRunner {
 
@@ -54,6 +54,9 @@ public interface PlatformCommandRunner {
     void beginToolCall(String toolCallId);
 
     void endToolCall();
+
+    /** Updates the workspace used for operation attribution when the user changes project roots. */
+    default void setProjectRoot(String projectRoot) { }
 
     /** True only when every active containment domain was observed empty. */
     boolean cancelTurn(String turnId, long absoluteDeadlineNanos);

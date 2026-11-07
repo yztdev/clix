@@ -27,4 +27,4 @@ if (($userPath -split ';') -notcontains $InstallDir) {
     $newPath = if ([string]::IsNullOrWhiteSpace($userPath)) { $InstallDir } else { "$userPath;$InstallDir" }
     [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
 }
-Write-Host '安装完成。请重开终端，执行 clix login，然后在项目目录运行 clix（默认进入 remote）。'
+Write-Host '安装完成。请重开终端，在项目目录运行 clix（本地 Agent）；需要远程 Agent 时显式执行 clix remote。'

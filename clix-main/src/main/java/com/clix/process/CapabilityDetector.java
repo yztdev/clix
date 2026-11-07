@@ -1,11 +1,12 @@
 package com.clix.process;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
 
 /**
- * Capability probing performed once at remote-client start (design doc "强监管模式").
+ * Capability probing for remote-client and local process runtimes (design doc "强监管模式").
  *
  * <p>Strict production mode requires a strong domain. Compatibility mode never hides the
  * downgrade: it returns an explicitly labelled PGID_ONLY containment. WSL Linux processes are
@@ -19,6 +20,69 @@ public final class CapabilityDetector {
                          String shellExecutable, String note) {
         public ContainmentLevel level() { return containment.level(); }
         public boolean degraded() { return containment.level().degraded(); }
+    }
+
+
+    /** True when this JVM itself is running on native Windows (not WSL/Linux). */
+    public static boolean isWindowsHost() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows");
+    }
+
+    /**
+     * Local-first Windows runtime: commands execute as native PowerShell processes and are
+     * contained by a Windows Job Object. This deliberately does not probe WSL or Linux cgroups.
+     */
+    public static Result detectLocalWindows() {
+        if (!isWindowsHost()) throw new IllegalStateException("本地 Windows 能力检测只能在 Windows JVM 中运行");
+        WindowsJobObjectContainment job = new WindowsJobObjectContainment();
+        if (!job.available()) {
+            throw new IllegalStateException("Windows Job Object 不可用，无法启用本地强进程监管");
+        }
+        String shell = resolvePowerShell();
+        return new Result(job, PlatformShell.disabled("native Windows; no POSIX probe required"), shell,
+                "原生 Windows PowerShell + Job Object（KILL_ON_JOB_CLOSE，禁止 breakaway）");
+    }
+
+    private static String resolvePowerShell() {
+        String configured = System.getenv("CLIX_POWERSHELL_EXE");
+        if (configured != null && !configured.isBlank()) {
+            String value = configured.trim();
+            if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+                value = value.substring(1, value.length() - 1);
+            }
+            return value;
+        }
+        String pwsh = findOnPath("pwsh.exe");
+        if (pwsh != null) return pwsh;
+        String root = System.getenv("SystemRoot");
+        if (root != null) {
+            Path powershell = Path.of(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+            if (Files.isRegularFile(powershell)) return powershell.toString();
+        }
+        return "powershell.exe";
+    }
+
+    private static String findOnPath(String executable) {
+        Process process = null;
+        try {
+            process = new ProcessBuilder("where.exe", executable).redirectErrorStream(true).start();
+            if (!process.waitFor(2_000L, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly();
+                return null;
+            }
+            if (process.exitValue() != 0) return null;
+            try (var input = process.getInputStream()) {
+                return new String(input.readAllBytes(), java.nio.charset.Charset.defaultCharset())
+                        .lines().map(String::trim).filter(line -> !line.isBlank()).findFirst().orElse(null);
+            }
+        } catch (IOException e) {
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } finally {
+            if (process != null && process.isAlive()) process.destroyForcibly();
+        }
     }
 
     public static Result detect(boolean strict) {

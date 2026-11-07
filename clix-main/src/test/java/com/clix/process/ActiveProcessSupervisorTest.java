@@ -116,6 +116,31 @@ class ActiveProcessSupervisorTest {
                 ProcessContainment.Signal.KILL), containment.signals);
     }
 
+    @Test void failedCooperativeSignalStillEscalatesToJobKill() {
+        containment.signalOk = false;
+        containment.emptyAfterSignal = ProcessContainment.Signal.KILL;
+        String operationId = start("t1");
+
+        ActiveProcessSupervisor.TerminationResult result = supervisor.cancelTurn("t1", deadline()).get(0);
+
+        assertTrue(result.confirmed());
+        assertTrue(result.forced());
+        assertEquals(ActiveProcessSupervisor.OperationState.CANCELLED_CONFIRMED, result.state());
+        assertEquals(List.of(ProcessContainment.Signal.INT, ProcessContainment.Signal.TERM,
+                ProcessContainment.Signal.KILL), containment.signals);
+    }
+
+    @Test void confirmedCancellationReleasesContainmentAfterOutputCapture() {
+        String operationId = start("t1");
+        ActiveProcessSupervisor.TerminationResult result = supervisor.cancelTurn("t1", deadline()).get(0);
+        assertTrue(result.confirmed());
+        assertEquals(0, containment.releaseCount, "调用方读取最终输出前不能释放监管句柄");
+
+        supervisor.releaseConfirmed(operationId);
+        supervisor.releaseConfirmed(operationId);
+        assertEquals(1, containment.releaseCount, "确认终态的监管句柄只能释放一次");
+    }
+
     @Test void unobservableDomainProducesCancelledUnknown() {
         containment.alwaysUnknown = true;
         String operationId = start("t1");

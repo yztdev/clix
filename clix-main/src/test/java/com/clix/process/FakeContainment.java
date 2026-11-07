@@ -26,6 +26,7 @@ public final class FakeContainment implements ProcessContainment {
     public volatile boolean identityOk = true;
     public volatile boolean escaped = false;
     public volatile boolean signalOk = true;
+    public volatile boolean killSignalOk = true;
     public volatile boolean neverEmpty = false;
     public volatile boolean alwaysUnknown = false;
     public volatile Signal emptyAfterSignal = null;
@@ -60,7 +61,7 @@ public final class FakeContainment implements ProcessContainment {
 
     @Override public boolean signal(ContainedProcess process, Signal signal) {
         signals.add(signal);
-        return signalOk;
+        return signal == Signal.KILL ? killSignalOk : signalOk;
     }
 
     @Override public EmptyDomain checkEmpty(ContainedProcess process) {

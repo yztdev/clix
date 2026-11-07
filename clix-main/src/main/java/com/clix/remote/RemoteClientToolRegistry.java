@@ -3,6 +3,7 @@ package com.clix.remote;
 import com.clix.hitl.HitlHandler;
 import com.clix.hitl.HitlToolRegistry;
 import com.clix.process.ActiveProcessSupervisor;
+import com.clix.process.SupervisorCommandRunner;
 import com.clix.tool.ToolRegistry.ToolInvocation;
 
 import java.util.concurrent.TimeUnit;
@@ -87,7 +88,6 @@ public final class RemoteClientToolRegistry extends HitlToolRegistry {
 
     @Override
     protected boolean beforeToolInvocation(ToolInvocation invocation) {
-        runner.beginToolCall(invocation.id());
         return requests.start(invocation.id());
     }
 

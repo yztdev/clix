@@ -1,9 +1,5 @@
-package com.clix.remote;
+package com.clix.process;
 
-import com.clix.process.ActiveProcessSupervisor;
-import com.clix.process.CapabilityDetector;
-import com.clix.process.ProcessContainment;
-import com.clix.process.RecoveryInspector;
 import com.clix.tool.PlatformCommandRunner;
 import com.clix.tool.ToolOutput;
 
@@ -15,14 +11,14 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Remote-client implementation of {@link PlatformCommandRunner}.
+ * Containment-aware command runner shared by local and remote-client runtimes.
  *
  * <p>Every execute_command goes through the supervisor: STARTING is registered before the
  * process exists, the platform containment launches it, and completion/cancellation are decided
  * by the same atomic state machine. Timeout and user cancellation share the graded termination
  * path but are recorded as different outcomes.</p>
  */
-final class SupervisorCommandRunner implements PlatformCommandRunner, AutoCloseable {
+public final class SupervisorCommandRunner implements PlatformCommandRunner, AutoCloseable {
 
     private static final long POLL_MILLIS = 100L;
     private static final int MAX_OUTPUT_CHARS = 32_000;
@@ -34,35 +30,40 @@ final class SupervisorCommandRunner implements PlatformCommandRunner, AutoClosea
     private final ThreadLocal<String> currentToolCall = new ThreadLocal<>();
     private volatile List<ActiveProcessSupervisor.TerminationResult> lastResults = List.of();
 
-    SupervisorCommandRunner(String projectRoot, boolean strict) {
+    public SupervisorCommandRunner(String projectRoot, boolean strict) {
         this(projectRoot, CapabilityDetector.detect(strict));
     }
 
-    /** Test seam: inject an explicit capability (fake containment). */
-    SupervisorCommandRunner(String projectRoot, CapabilityDetector.Result capability) {
+    /** Creates the local-first native Windows runner; Linux process containment remains opt-in/deferred. */
+    public static SupervisorCommandRunner forLocalWindows(String projectRoot) {
+        return new SupervisorCommandRunner(projectRoot, CapabilityDetector.detectLocalWindows());
+    }
+
+    /** Test seam and local-runtime entry point: inject an explicit platform capability. */
+    public SupervisorCommandRunner(String projectRoot, CapabilityDetector.Result capability) {
         this(projectRoot, capability, ActiveProcessSupervisor.SYSTEM_CLOCK,
                 ActiveProcessSupervisor.PhaseBudget.standard());
     }
 
     /** Test seam: deterministic clock and shortened (never extended) phase budgets. */
-    SupervisorCommandRunner(String projectRoot, CapabilityDetector.Result capability,
-                            ActiveProcessSupervisor.Clock clock,
-                            ActiveProcessSupervisor.PhaseBudget budget) {
+    public SupervisorCommandRunner(String projectRoot, CapabilityDetector.Result capability,
+                                   ActiveProcessSupervisor.Clock clock,
+                                   ActiveProcessSupervisor.PhaseBudget budget) {
         this.projectRoot = projectRoot == null ? "." : projectRoot;
         this.capability = capability;
         this.supervisor = new ActiveProcessSupervisor(capability.containment(), clock, budget, null);
         this.recovery = new RecoveryInspector(supervisor, clock);
     }
 
-    ActiveProcessSupervisor supervisor() { return supervisor; }
+    public ActiveProcessSupervisor supervisor() { return supervisor; }
 
-    void setProjectRoot(String projectRoot) {
+    @Override public void setProjectRoot(String projectRoot) {
         if (projectRoot != null && !projectRoot.isBlank()) this.projectRoot = projectRoot;
     }
 
-    CapabilityDetector.Result capability() { return capability; }
+    public CapabilityDetector.Result capability() { return capability; }
 
-    List<ActiveProcessSupervisor.TerminationResult> lastResults() { return lastResults; }
+    public List<ActiveProcessSupervisor.TerminationResult> lastResults() { return lastResults; }
 
     @Override public void beginTurn(String turnId) { supervisor.beginTurn(turnId); }
 
@@ -82,9 +83,8 @@ final class SupervisorCommandRunner implements PlatformCommandRunner, AutoClosea
         String nonce = supervisor.nonce(operationId);
         List<String> base = spec.sandboxArguments() == null || spec.sandboxArguments().isEmpty()
                 ? List.of(command) : spec.sandboxArguments();
-        // ToolRegistry already resolved the shell that matches the command dialect (Git Bash /
-        // WSL bash / native shell). Capability probing must not silently switch it and break
-        // existing command semantics.
+        // ToolRegistry may supply an explicit shell; otherwise use the runtime capability's
+        // native shell (PowerShell for local Windows, WSL bash for the legacy remote-client mode).
         String shell = spec.preferredShell() == null || spec.preferredShell().isBlank()
                 ? capability.shellExecutable() : spec.preferredShell();
         ProcessContainment.StartRequest request = new ProcessContainment.StartRequest(
@@ -133,7 +133,16 @@ final class SupervisorCommandRunner implements PlatformCommandRunner, AutoClosea
         }
         ActiveProcessSupervisor.Operation operation = supervisor.operation(operationId);
         ActiveProcessSupervisor.TerminationResult termination = operation == null ? null : operation.result();
+        if (supervisor.isCancelled(operationId) && termination == null) {
+            try {
+                termination = supervisor.awaitTerminationResult(operationId,
+                        ActiveProcessSupervisor.HARD_DEADLINE_MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
         String output = readOutput(operationId);
+        if (termination != null && termination.confirmed()) supervisor.releaseConfirmed(operationId);
         String containmentNote = termination == null ? "" : "；监管域=" + termination.state()
                 + "/" + termination.terminationWire() + "/" + termination.containment().wireValue()
                 + (termination.limitation() == null ? "" : "（" + termination.limitation() + "）");

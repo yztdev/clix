@@ -44,6 +44,7 @@ public final class WindowsJobObjectContainment implements ProcessContainment {
     private static final int FILE_ATTRIBUTE_NORMAL = 0x00000080;
     private static final int CTRL_BREAK_EVENT = 1;
     private static final int WAIT_OBJECT_0 = 0;
+    private static final int HANDLE_FLAG_INHERIT = 0x00000001;
 
     public record NativeHandles(WinNT.HANDLE job, WinNT.HANDLE process, WinNT.HANDLE thread,
                                 WinNT.HANDLE output, String nonce, int pid) { }
@@ -67,6 +68,7 @@ public final class WindowsJobObjectContainment implements ProcessContainment {
         boolean GetExitCodeProcess(WinNT.HANDLE process, IntByReference exitCode);
         int WaitForSingleObject(WinNT.HANDLE handle, int millis);
         boolean CloseHandle(WinNT.HANDLE handle);
+        boolean SetHandleInformation(WinNT.HANDLE handle, int mask, int flags);
         int GetLastError();
     }
 
@@ -98,13 +100,19 @@ public final class WindowsJobObjectContainment implements ProcessContainment {
 
     @Override public List<String> wrapCommand(List<String> baseArguments, StartRequest request) {
         if (baseArguments == null || baseArguments.isEmpty() || baseArguments.size() > 1) {
-            return baseArguments; // sandbox invocation is already a full command line
+            return baseArguments; // a sandbox invocation is already a complete argv vector
         }
         String shell = request.shellExecutable();
-        if (shell != null && !shell.isBlank() && !shell.toLowerCase().contains("cmd.exe")) {
-            return List.of(shell, "-c", baseArguments.get(0));
+        if (shell == null || shell.isBlank()) shell = "powershell.exe";
+        String executable = Path.of(shell).getFileName().toString().toLowerCase(java.util.Locale.ROOT);
+        String command = baseArguments.get(0);
+        if (executable.equals("pwsh.exe") || executable.equals("powershell.exe")) {
+            return List.of(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command);
         }
-        return List.of("cmd.exe", "/c", baseArguments.get(0));
+        if (executable.equals("cmd.exe")) {
+            return List.of(shell, "/d", "/s", "/c", command);
+        }
+        return List.of(shell, "-c", command);
     }
 
     @Override public ContainedProcess start(StartRequest request) throws IOException {
@@ -119,6 +127,12 @@ public final class WindowsJobObjectContainment implements ProcessContainment {
             delete(output);
             throw new IOException("无法创建 Job Object 输出句柄: " + API.GetLastError());
         }
+        if (!API.SetHandleInformation(hOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
+            int error = API.GetLastError();
+            API.CloseHandle(hOutput);
+            delete(output);
+            throw new IOException("无法将输出句柄设置为可继承: " + error);
+        }
         WinBase.STARTUPINFO startup = new WinBase.STARTUPINFO();
         startup.cb = new WinDef.DWORD(startup.size());
         startup.dwFlags = WinBase.STARTF_USESTDHANDLES;
@@ -131,8 +145,14 @@ public final class WindowsJobObjectContainment implements ProcessContainment {
         Memory environment = unicodeEnvironment(request);
         String workingDirectory = request.workingDirectory() == null
                 ? null : request.workingDirectory().toString();
-        char[] commandLine = joinCommandLine(request.baseArguments()).toCharArray();
-        boolean created = API.CreateProcessW(null, commandLine, null, null, false,
+        List<String> launchArguments = wrapCommand(request.baseArguments(), request);
+        if (launchArguments == null || launchArguments.isEmpty()) {
+            API.CloseHandle(hOutput);
+            delete(output);
+            throw new IOException("命令行为空");
+        }
+        char[] commandLine = joinCommandLine(launchArguments).toCharArray();
+        boolean created = API.CreateProcessW(null, commandLine, null, null, true,
                 new WinDef.DWORD(flags), environment, workingDirectory, startup, processInfo);
         if (!created) {
             int error = API.GetLastError();
@@ -141,7 +161,8 @@ public final class WindowsJobObjectContainment implements ProcessContainment {
             throw new IOException("CreateProcessW 失败: " + error);
         }
 
-        WinNT.HANDLE job = API.CreateJobObjectW(null, "clix-op-" + shortId(request.operationId()));
+        WinNT.HANDLE job = API.CreateJobObjectW(null, "clix-op-" + ProcessHandle.current().pid()
+                + "-" + fullId(request.operationId()));
         if (isInvalid(job)) {
             cleanupFailedStart(processInfo, hOutput, output);
             throw new IOException("CreateJobObjectW 失败: " + API.GetLastError());
@@ -245,9 +266,9 @@ public final class WindowsJobObjectContainment implements ProcessContainment {
         return handle == null || Pointer.nativeValue(handle.getPointer()) == 0;
     }
 
-    private static String shortId(String operationId) {
-        String value = operationId == null ? "" : operationId.replace("-", "");
-        return value.length() > 12 ? value.substring(0, 12) : value;
+    private static String fullId(String operationId) {
+        return operationId == null ? java.util.UUID.randomUUID().toString().replace("-", "")
+                : operationId.replace("-", "");
     }
 
     private static Memory unicodeEnvironment(StartRequest request) {
@@ -263,17 +284,43 @@ public final class WindowsJobObjectContainment implements ProcessContainment {
         return memory;
     }
 
-    private static String joinCommandLine(List<String> arguments) {
+    static String joinCommandLine(List<String> arguments) {
         StringBuilder out = new StringBuilder();
         for (String argument : arguments) {
             if (out.length() > 0) out.append(' ');
-            if (argument != null && argument.matches("[A-Za-z0-9_./:\\\\-]+")) {
-                out.append(argument);
-            } else {
-                out.append('"').append(argument == null ? "" : argument.replace("\"", "\\\"")).append('"');
-            }
+            out.append(quoteWindowsArgument(argument == null ? "" : argument));
         }
         return out.toString();
+    }
+
+    /** Implements the CommandLineToArgvW / Microsoft CRT backslash-and-quote rules. */
+    static String quoteWindowsArgument(String argument) {
+        if (argument.isEmpty()) return "\"\"";
+        boolean needsQuotes = argument.chars().anyMatch(ch -> Character.isWhitespace(ch) || ch == '\"');
+        if (!needsQuotes) return argument;
+
+        StringBuilder out = new StringBuilder(argument.length() + 2);
+        out.append('\"');
+        int backslashes = 0;
+        for (int i = 0; i < argument.length(); i++) {
+            char ch = argument.charAt(i);
+            if (ch == '\\') {
+                backslashes++;
+                continue;
+            }
+            if (ch == '\"') {
+                out.append("\\".repeat(backslashes * 2 + 1)).append('\"');
+                backslashes = 0;
+                continue;
+            }
+            if (backslashes > 0) {
+                out.append("\\".repeat(backslashes));
+                backslashes = 0;
+            }
+            out.append(ch);
+        }
+        if (backslashes > 0) out.append("\\".repeat(backslashes * 2));
+        return out.append('\"').toString();
     }
 
     private static void delete(Path path) {

@@ -25,12 +25,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * and the bridge is a no-op: the existing JLine {@code Terminal.Signal.INT} handler stays in charge.
  * The bridge never throws into application code and never performs blocking work in the signal path.
  */
-final class ConsoleCancelBridge implements Closeable {
+public final class ConsoleCancelBridge implements Closeable {
     /** Pipe path the native launcher writes cancel bytes to; empty/unset means "use JLine instead". */
     static final String ENV_PIPE = "CLIX_CANCEL_PIPE";
 
     /** Invoked once per cancel byte received from the launcher. */
-    interface CancelAction { void cancel(); }
+    public interface CancelAction { void cancel(); }
 
     private final ExecutorService reader = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "clix-console-cancel");
@@ -42,7 +42,7 @@ final class ConsoleCancelBridge implements Closeable {
     private volatile InputStream stream;
 
     /** Starts the bridge only when {@link #ENV_PIPE} is configured; returns {@code null} otherwise. */
-    static ConsoleCancelBridge startIfConfigured(CancelAction action) {
+    public static ConsoleCancelBridge startIfConfigured(CancelAction action) {
         String spec = System.getenv(ENV_PIPE);
         if (spec == null || spec.isBlank()) return null;
         ConsoleCancelBridge bridge = new ConsoleCancelBridge();

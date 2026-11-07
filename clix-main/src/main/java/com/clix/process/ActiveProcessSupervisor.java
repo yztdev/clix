@@ -125,6 +125,7 @@ public final class ActiveProcessSupervisor implements AutoCloseable {
         private volatile String lastVerification;
         /** Set when cancellation arrives after STARTING but before the PID was registered. */
         private volatile boolean cancelWhileStarting;
+        private volatile boolean released;
 
         private Operation(String id, RegisterRequest request, String nonce, long now) {
             this.id = id;
@@ -336,7 +337,12 @@ public final class ActiveProcessSupervisor implements AutoCloseable {
                 reason = sent ? "监管域已确认清空" : "进程在信号前已退出，监管域已确认清空";
                 break;
             }
-            if (!sent) { reason = "平台拒绝发送信号，监管域状态未确认"; break; }
+            if (!sent) {
+                // A failed cooperative signal must not suppress stronger cleanup attempts.
+                // In particular, Windows CTRL_BREAK may be unavailable for CREATE_NO_WINDOW
+                // processes; the later Job Object KILL phase is still authoritative.
+                reason = "平台未能发送当前级别信号，继续尝试更强终止方式";
+            }
         }
         if (confirmed && containment.escapedDomain(handle)) {
             confirmed = false;
@@ -429,7 +435,7 @@ public final class ActiveProcessSupervisor implements AutoCloseable {
             op.reason = reason;
             handle = op.handle;
         }
-        if (handle != null) containment.release(handle);
+        if (handle != null) releaseHandle(op, handle);
         notifyListener(op);
     }
 
@@ -452,12 +458,41 @@ public final class ActiveProcessSupervisor implements AutoCloseable {
         Operation op = operations.get(operationId);
         if (op == null || op.handle == null) return false;
         if (op.state != OperationState.CANCELLED_UNKNOWN) return op.state == OperationState.CANCELLED_CONFIRMED;
-        if (!containment.identityVerified(op.handle)) return false;
-        if (containment.checkEmpty(op.handle) != ProcessContainment.EmptyDomain.EMPTY) return false;
-        if (containment.escapedDomain(op.handle)) return false;
+        ProcessContainment.ContainedProcess handle = op.handle;
+        if (!containment.identityVerified(handle)) return false;
+        if (containment.checkEmpty(handle) != ProcessContainment.EmptyDomain.EMPTY) return false;
+        if (containment.escapedDomain(handle)) return false;
         op.lastVerification = "empty-confirmed-by-recovery";
+        releaseHandle(op, handle);
         notifyListener(op);
         return true;
+    }
+
+    /** Releases a confirmed-cancel domain after its final output has been captured. */
+    public void releaseConfirmed(String operationId) {
+        Operation op = operations.get(operationId);
+        if (op == null || op.state != OperationState.CANCELLED_CONFIRMED || op.handle == null) return;
+        releaseHandle(op, op.handle);
+    }
+
+    /** Waits briefly for an external cancelTurn caller to publish its terminal result. */
+    public TerminationResult awaitTerminationResult(String operationId, long timeoutMillis)
+            throws InterruptedException {
+        Operation op = operations.get(operationId);
+        if (op == null) return null;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, timeoutMillis));
+        while (op.result == null && System.nanoTime() < deadline) {
+            Thread.sleep(10L);
+        }
+        return op.result;
+    }
+
+    private void releaseHandle(Operation op, ProcessContainment.ContainedProcess handle) {
+        synchronized (op) {
+            if (op.released || op.handle != handle) return;
+            op.released = true;
+        }
+        containment.release(handle);
     }
 
     /** Absolute first-Ctrl+C deadline for a turn; exposed for status and acceptance tests. */
@@ -503,6 +538,10 @@ public final class ActiveProcessSupervisor implements AutoCloseable {
     private record Phase(ProcessContainment.Signal signal, long millis) { }
 
     @Override public void close() {
+        for (Operation op : operations.values()) {
+            ProcessContainment.ContainedProcess handle = op.handle;
+            if (handle != null) releaseHandle(op, handle);
+        }
         containment.close();
     }
 }

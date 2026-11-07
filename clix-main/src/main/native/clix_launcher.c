@@ -134,7 +134,7 @@ static BOOL buildCommandLine(wchar_t *out, size_t capacity, const wchar_t *jar, 
     out[0] = L'\0';
     if (!appendArg(out, capacity, L"java") || !appendSpaceArg(out, capacity, L"-jar") ||
         !appendSpaceArg(out, capacity, jar)) return FALSE;
-    if (argc <= 1) return appendSpaceArg(out, capacity, L"remote");
+    if (argc <= 1) return TRUE; /* no args => local-first CLI */
     for (int i = 1; i < argc; ++i) {
         if (!appendSpaceArg(out, capacity, argv[i])) return FALSE;
     }

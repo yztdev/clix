@@ -114,7 +114,7 @@ public class ToolRegistry {
     /** REQUIRED 模式下沙箱不可用的原因；非 null 时 execute_command 拒绝执行。 */
     private volatile String commandSandboxRequiredFailure;
     private volatile CommandExecutionObserver commandExecutionObserver;
-    /** Phase-two platform launcher; only remote clients install one, local mode keeps the built-in path. */
+    /** Optional supervised launcher; local Windows and remote clients install one. */
     private volatile PlatformCommandRunner platformCommandRunner;
     private final java.util.concurrent.atomic.AtomicLong commandInvocationIds = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong commandObservationFailures = new java.util.concurrent.atomic.AtomicLong();
@@ -156,6 +156,8 @@ public class ToolRegistry {
         if (sandboxMode != null && sandboxMode != CommandSandboxMode.OFF) {
             configureCommandSandbox(sandboxMode, Path.of(projectPath));
         }
+        PlatformCommandRunner runner = platformCommandRunner;
+        if (runner != null) runner.setProjectRoot(projectPath);
         if (!customSnapshotService) {
             this.snapshotService.close();
             this.snapshotService = SnapshotService.forProject(Path.of(projectPath));
@@ -190,6 +192,7 @@ public class ToolRegistry {
      */
     public void setPlatformCommandRunner(PlatformCommandRunner runner) {
         this.platformCommandRunner = runner;
+        if (runner != null) runner.setProjectRoot(projectPath);
     }
 
     public long getCommandObservationFailures() {
@@ -1680,7 +1683,7 @@ public class ToolRegistry {
                 continue;
             }
             long startedAt = System.nanoTime();
-            ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
+            ToolOutput output = executeToolInvocation(invocation);
             results.add(ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt)));
         }
         return results;
@@ -1704,7 +1707,7 @@ public class ToolRegistry {
                             return ToolExecutionResult.failed(invocation, "工具调用已取消或连接已断开");
                         }
                         long startedAt = System.nanoTime();
-                        ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
+                        ToolOutput output = executeToolInvocation(invocation);
                         return ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt));
                     })
                     .toList();
@@ -1742,6 +1745,16 @@ public class ToolRegistry {
                     .toList();
         } finally {
             executor.shutdownNow();
+        }
+    }
+
+    private ToolOutput executeToolInvocation(ToolInvocation invocation) {
+        PlatformCommandRunner runner = platformCommandRunner;
+        if (runner != null) runner.beginToolCall(invocation.id());
+        try {
+            return executeToolOutput(invocation.name(), invocation.argumentsJson());
+        } finally {
+            if (runner != null) runner.endToolCall();
         }
     }
 
@@ -1811,12 +1824,36 @@ public class ToolRegistry {
         }
     }
 
-    /** Opens a new command scope after the previous turn has finished its local cleanup. */
+    /** Opens a new legacy command scope after the previous turn has finished local cleanup. */
     public void startCommandTurn() {
         if (!activeCommands.isEmpty()) {
             throw new IllegalStateException("上一轮命令仍在清理，暂时不能开始新任务");
         }
         activeCommandCancellation.set(false);
+    }
+
+    /** Starts a local/remote supervised command scope for one Agent Turn. */
+    public void beginCommandTurn(String turnId) {
+        startCommandTurn();
+        PlatformCommandRunner runner = platformCommandRunner;
+        if (runner != null) runner.beginTurn(turnId);
+    }
+
+    /**
+     * Cancels the supervised operation domain for this Turn and the legacy launcher fallback.
+     * The caller owns the absolute deadline and must not extend it on repeated cancellation.
+     */
+    public boolean cancelCommandTurn(String turnId, long absoluteDeadlineNanos) {
+        PlatformCommandRunner runner = platformCommandRunner;
+        boolean confirmed = runner != null && runner.cancelTurn(turnId, absoluteDeadlineNanos);
+        cancelActiveCommands();
+        return confirmed;
+    }
+
+    /** Human-readable local command containment status; Linux supervision may be deferred. */
+    public String commandSupervisorStatus() {
+        PlatformCommandRunner runner = platformCommandRunner;
+        return runner == null ? "本地命令监管器未启用（使用兼容执行路径）" : runner.statusLine();
     }
 
     private String resolveRemoteWindowsBash() {
@@ -1842,6 +1879,53 @@ public class ToolRegistry {
         String systemRoot = System.getenv("SystemRoot");
         return bash != null && systemRoot != null
                 && bash.equalsIgnoreCase(Path.of(systemRoot, "System32", "bash.exe").toString());
+    }
+
+    private static boolean isWindowsHost() {
+        return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).startsWith("windows");
+    }
+
+    /** Local-first Windows commands use native PowerShell; WSL is only selected by explicit remote mode. */
+    private static String resolveLocalWindowsPowerShell() {
+        String configured = System.getenv("CLIX_POWERSHELL_EXE");
+        if (configured != null && !configured.isBlank()) {
+            String value = configured.trim();
+            if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+                value = value.substring(1, value.length() - 1);
+            }
+            return value;
+        }
+        String pwsh = findExecutableOnPath("pwsh.exe");
+        if (pwsh != null) return pwsh;
+        String root = System.getenv("SystemRoot");
+        if (root != null) {
+            Path powershell = Path.of(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+            if (Files.isRegularFile(powershell)) return powershell.toString();
+        }
+        return "powershell.exe";
+    }
+
+    private static String findExecutableOnPath(String executable) {
+        Process process = null;
+        try {
+            process = new ProcessBuilder("where.exe", executable).redirectErrorStream(true).start();
+            if (!process.waitFor(2, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                return null;
+            }
+            if (process.exitValue() != 0) return null;
+            try (var input = process.getInputStream()) {
+                return new String(input.readAllBytes(), java.nio.charset.Charset.defaultCharset())
+                        .lines().map(String::trim).filter(line -> !line.isBlank()).findFirst().orElse(null);
+            }
+        } catch (IOException e) {
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } finally {
+            if (process != null && process.isAlive()) process.destroyForcibly();
+        }
     }
 
     private ToolOutput executeCommandOutput(String command) {
@@ -1873,8 +1957,8 @@ public class ToolRegistry {
                     + CommandSandboxMode.ENV + "=required 时不在宿主直接执行命令");
         }
 
-        // Phase two: remote clients own every local command through ActiveProcessSupervisor.
-        // The built-in launcher below is kept untouched for local (non-remote) sessions.
+        // Local Windows and remote clients can route commands through ActiveProcessSupervisor.
+        // Native Linux local mode keeps the compatibility launcher until cgroup work is scheduled.
         PlatformCommandRunner runner = platformCommandRunner;
         if (runner != null) {
             ToolOutput delegated = delegateCommand(runner, normalized, observation);
@@ -1898,6 +1982,8 @@ public class ToolRegistry {
                     : activeSandbox.prepare(Path.of(projectPath), normalized);
             String remoteBash = sandboxInvocation == null ? resolveRemoteWindowsBash() : null;
             boolean wsl = isWslBash(remoteBash);
+            String localPowerShell = sandboxInvocation == null && !remoteWslCancellation && isWindowsHost()
+                    ? resolveLocalWindowsPowerShell() : null;
             String wslGateName = null;
             if (wsl) {
                 String id = java.util.UUID.randomUUID().toString();
@@ -1914,10 +2000,17 @@ public class ToolRegistry {
                     + "bash -c \"$(printf %s " + encodeShellData(normalized) + " | base64 -d)\" </dev/null; "
                     + "status=$?; kill \"$stdin_watcher\" \"$gate_watcher\" 2>/dev/null; "
                     + "wait \"$stdin_watcher\" 2>/dev/null; wait \"$gate_watcher\" 2>/dev/null; exit \"$status\"\n";
-            ProcessBuilder pb = wsl
-                    ? new ProcessBuilder(remoteBash, "-c", "setsid --wait bash -s -- " + wslMarker + " " + wslGateName)
-                    : sandboxInvocation == null ? new ProcessBuilder(remoteBash == null ? "bash" : remoteBash, "-c", normalized)
-                    : new ProcessBuilder(sandboxInvocation.arguments());
+            ProcessBuilder pb;
+            if (sandboxInvocation != null) {
+                pb = new ProcessBuilder(sandboxInvocation.arguments());
+            } else if (wsl) {
+                pb = new ProcessBuilder(remoteBash, "-c", "setsid --wait bash -s -- " + wslMarker + " " + wslGateName);
+            } else if (localPowerShell != null) {
+                pb = new ProcessBuilder(localPowerShell, "-NoLogo", "-NoProfile", "-NonInteractive",
+                        "-Command", normalized);
+            } else {
+                pb = new ProcessBuilder(remoteBash == null ? "bash" : remoteBash, "-c", normalized);
+            }
             pb.directory(sandboxInvocation == null
                     ? new File(projectPath)
                     : sandboxInvocation.workingDirectory().toFile());

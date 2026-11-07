@@ -54,6 +54,9 @@ import com.clix.snapshot.SnapshotService;
 import com.clix.snapshot.TurnSnapshot;
 import com.clix.skill.SkillRegistry;
 import com.clix.tool.ToolRegistry;
+import com.clix.process.CapabilityDetector;
+import com.clix.remote.ConsoleCancelBridge;
+import com.clix.process.SupervisorCommandRunner;
 import com.clix.util.AnsiStyle;
 import com.clix.util.TerminalInputLock;
 import com.clix.util.TerminalTable;
@@ -130,6 +133,8 @@ public class Main {
     private static final String HISTORY_SIZE_PROPERTY = "clix.history.size";
     private static final String HISTORY_FILE_SIZE_PROPERTY = "clix.history.fileSize";
     private static final String DEFAULT_HISTORY_FILE_NAME = "input.history";
+    /** Native clix.exe Ctrl+C events are routed to the currently active local Turn. */
+    private static final AtomicReference<Runnable> ACTIVE_TURN_CANCEL = new AtomicReference<>();
     private static final String BRACKETED_PASTE_BEGIN = "[200~";
     private static final String BRACKETED_PASTE_END = "\u001b[201~";
     private static final String ARROW_UP = "[A";
@@ -266,6 +271,26 @@ public class Main {
             hitlHandler.setHighRiskConfirmationEnabled(true);
             SessionModeController sessionModes = new SessionModeController(hitlHandler);
             HitlToolRegistry hitlToolRegistry = new HitlToolRegistry(hitlHandler);
+            String processRuntimeNote = "";
+            if (CapabilityDetector.isWindowsHost()) {
+                try {
+                    SupervisorCommandRunner localRunner = SupervisorCommandRunner.forLocalWindows(
+                            hitlToolRegistry.getProjectPath());
+                    hitlToolRegistry.setPlatformCommandRunner(localRunner);
+                    Runtime.getRuntime().addShutdownHook(new Thread(localRunner::close,
+                            "clix-local-process-runtime-shutdown"));
+                    processRuntimeNote = "本地命令执行：原生 PowerShell + Windows Job Object";
+                } catch (RuntimeException e) {
+                    boolean strict = Boolean.parseBoolean(System.getenv("CLIX_STRICT_PROCESS_CONTAINMENT"));
+                    if (strict) {
+                        System.err.println("严格本地进程监管初始化失败，拒绝启动：" + e.getMessage());
+                        return;
+                    }
+                    processRuntimeNote = "Windows Job Object 不可用，命令执行将使用兼容路径：" + e.getMessage();
+                }
+            } else if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("linux")) {
+                processRuntimeNote = "Linux 本地命令执行已启用；cgroup v2 强进程监管暂缓到后续阶段，当前不承诺确定性清理";
+            }
             // auto 模式的 Shell 命令审查：跟随当前会话的供应商，关闭思考的轻量请求；切换模型后自动重建
             com.clix.hitl.LlmApprovalClassifier approvalClassifier = new com.clix.hitl.LlmApprovalClassifier(
                     approvalClassifierClient(llmClientRef, config));
@@ -321,19 +346,28 @@ public class Main {
             renderer.start();
             renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, null)
                     .withSessionMode(sessionModes.current().statusLabel()));
+            ConsoleCancelBridge cancelBridge = ConsoleCancelBridge.startIfConfigured(() -> {
+                Runnable action = ACTIVE_TURN_CANCEL.get();
+                if (action != null) action.run();
+                else System.exit(130); // Ctrl+C at the prompt keeps normal CLI exit semantics.
+            });
+            if (cancelBridge != null) {
+                Runtime.getRuntime().addShutdownHook(new Thread(cancelBridge::close,
+                        "clix-console-cancel-bridge-shutdown"));
+            }
 
-            String startupNote = "";
+            String startupNote = processRuntimeNote;
             try {
                 McpConfigBootstrapResult bootstrapResult = ensureDefaultMcpConfig(Path.of(System.getProperty("user.home")));
                 if (!bootstrapResult.message().isBlank()) {
-                    startupNote = bootstrapResult.message();
+                    startupNote = appendStartupNote(startupNote, bootstrapResult.message());
                 }
                 mcpServerManager.loadConfiguredServers();
                 mcpServerManager.startAll(ui, mcpStartupWait());
                 startupNote = appendStartupNote(startupNote, mcpServerManager.untrustedStartupNote());
                 Runtime.getRuntime().addShutdownHook(new Thread(mcpServerManager::close, "clix-mcp-shutdown"));
             } catch (Exception e) {
-                startupNote = "MCP 初始化失败: " + e.getMessage();
+                startupNote = appendStartupNote(startupNote, "MCP 初始化失败: " + e.getMessage());
             }
             AtMentionExpander mentionExpander = new AtMentionExpander(mcpServerManager);
             LocalPathMentionExpander localPathMentionExpander = new LocalPathMentionExpander(Path.of("."));
@@ -1057,9 +1091,18 @@ public class Main {
                 }
                 SnapshotService snapshotService = reactAgent.getToolRegistry().getSnapshotService();
                 renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, snapshotMode));
+                String localTurnId = java.util.UUID.randomUUID().toString();
+                hitlToolRegistry.beginCommandTurn(localTurnId);
                 String response = runWithCancelSupport(terminal,
                         ui,
-                        () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call));
+                        () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call),
+                        () -> {
+                            boolean confirmed = hitlToolRegistry.cancelCommandTurn(localTurnId,
+                                    System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(
+                                            com.clix.process.ActiveProcessSupervisor.HARD_DEADLINE_MILLIS));
+                            ui.println(confirmed ? "已确认本地命令监管域清空。"
+                                    : "取消已请求，但当前平台无法确认所有进程均已退出；请先核验执行环境。");
+                        });
                 if (!"react".equals(snapshotMode)) {
                     renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                 }
@@ -1365,6 +1408,11 @@ public class Main {
     }
 
     private static String runWithCancelSupport(Terminal terminal, PrintStream out, Callable<String> task) {
+        return runWithCancelSupport(terminal, out, task, null);
+    }
+
+    private static String runWithCancelSupport(Terminal terminal, PrintStream out, Callable<String> task,
+                                              Runnable cancelCommandDomain) {
         CancellationToken token = CancellationContext.startRun();
         ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "clix-agent-runner");
@@ -1372,42 +1420,55 @@ public class Main {
             return thread;
         });
         Future<String> future = executor.submit(task);
-        // 进入 raw mode 监听 ESC：raw mode 关 ICANON / ECHO / IEXTEN 但保留 ISIG，所以 Ctrl+C 仍能终止 clix。
+        java.util.concurrent.atomic.AtomicBoolean cancellationRequested =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        Runnable cancel = () -> {
+            if (!cancellationRequested.compareAndSet(false, true)) return;
+            token.cancel();
+            // Cancel the OS process domain before interrupting the Agent worker. The runner's
+            // cancellation path is bounded by the same 10-second absolute deadline.
+            if (cancelCommandDomain != null) {
+                try { cancelCommandDomain.run(); }
+                catch (RuntimeException ignored) { /* interruption still stops the Agent loop */ }
+            }
+            future.cancel(true);
+            executor.shutdownNow();
+        };
+        ACTIVE_TURN_CANCEL.set(cancel);
+        // Raw mode listens for ESC; native clix.exe delivers Ctrl+C through ConsoleCancelBridge.
         Attributes original = null;
         try {
             if (terminal != null) {
                 try {
                     original = terminal.enterRawMode();
                 } catch (Exception ignored) {
-                    // raw mode 进入失败（非交互终端等），降级为不监听 ESC，靠 Ctrl+C 退出。
+                    // raw mode 进入失败（非交互终端等），仍可通过 Future 中断和平台监管器取消。
                 }
             }
             while (!future.isDone()) {
                 if (original != null && pollEscCancel(terminal)) {
-                    token.cancel();
-                    future.cancel(true);
-                    executor.shutdownNow();
-                    return "⏹️ 已请求取消当前任务。";
+                    cancel.run();
+                    return "⏹️ 正在取消当前任务。";
                 }
                 try {
                     return future.get(150, TimeUnit.MILLISECONDS);
                 } catch (java.util.concurrent.TimeoutException ignored) {
-                    // 继续监听 ESC
+                    // 继续监听 ESC / native Ctrl+C
                 }
             }
             return future.get();
         } catch (CancellationException e) {
             return "⏹️ 已取消当前任务。";
         } catch (InterruptedException e) {
+            cancel.run();
             Thread.currentThread().interrupt();
-            token.cancel();
-            future.cancel(true);
             return "⏹️ 已取消当前任务。";
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             String message = cause == null || cause.getMessage() == null ? "未知错误" : cause.getMessage();
             return "❌ 执行失败: " + message;
         } finally {
+            ACTIVE_TURN_CANCEL.compareAndSet(cancel, null);
             if (terminal != null && original != null) {
                 try {
                     terminal.setAttributes(original);
