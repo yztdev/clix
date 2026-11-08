@@ -10,6 +10,7 @@ import com.clix.browser.BrowserMode;
 import com.clix.browser.BrowserSession;
 import com.clix.browser.SensitivePagePolicy;
 import com.clix.config.ClixConfig;
+import com.clix.config.UserEnv;
 import com.clix.hitl.HitlHandler;
 import com.clix.hitl.HitlToolRegistry;
 import com.clix.hitl.SwitchableHitlHandler;
@@ -54,9 +55,6 @@ import com.clix.snapshot.SnapshotService;
 import com.clix.snapshot.TurnSnapshot;
 import com.clix.skill.SkillRegistry;
 import com.clix.tool.ToolRegistry;
-import com.clix.process.CapabilityDetector;
-import com.clix.remote.ConsoleCancelBridge;
-import com.clix.process.SupervisorCommandRunner;
 import com.clix.util.AnsiStyle;
 import com.clix.util.TerminalInputLock;
 import com.clix.util.TerminalTable;
@@ -111,7 +109,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
 /**
- * clix v16.1.0 - Terminal-First Agent IDE
+ * clix - Terminal-First Agent IDE
  * 支持 ReAct、Plan-and-Execute、Memory、RAG、Multi-Agent、HITL、并行工具调用、多模型切换、MCP、CDP 会话复用
  * 第 15 期新增：Skill 系统（三层加载 + load_skill 工具 + 同轮正文注入）、内置 web-access skill
  * 第 16 期新增：TUI 界面（Lanterna 3）、文件树浏览、代码高亮、对话历史可视化、配置管理面板
@@ -122,8 +120,6 @@ import java.util.regex.Pattern;
  * HITL 增强：路径围栏（PathGuard）、命令快速拒绝（CommandGuard）、操作审计链（AuditLog）—— 见 com.clix.policy
  */
 public class Main {
-    private static final String VERSION = "16.1.0";
-    private static final String ENV_FILE = ".env";
     private static final String LOG_DIR_PROPERTY = "clix.log.dir";
     private static final String LOG_LEVEL_PROPERTY = "clix.log.level";
     private static final String LOG_MAX_HISTORY_PROPERTY = "clix.log.maxHistory";
@@ -133,8 +129,6 @@ public class Main {
     private static final String HISTORY_SIZE_PROPERTY = "clix.history.size";
     private static final String HISTORY_FILE_SIZE_PROPERTY = "clix.history.fileSize";
     private static final String DEFAULT_HISTORY_FILE_NAME = "input.history";
-    /** Native clix.exe Ctrl+C events are routed to the currently active local Turn. */
-    private static final AtomicReference<Runnable> ACTIVE_TURN_CANCEL = new AtomicReference<>();
     private static final String BRACKETED_PASTE_BEGIN = "[200~";
     private static final String BRACKETED_PASTE_END = "\u001b[201~";
     private static final String ARROW_UP = "[A";
@@ -228,22 +222,9 @@ public class Main {
             }
             return;
         }
-        if (com.clix.remote.RemoteServerCommand.matches(args)) {
-            configureLogging();
-            int code = com.clix.remote.RemoteServerCommand.run(args);
-            if (code != 0) System.exit(code);
-            return;
-        }
-        if (com.clix.remote.RemoteLoginCommand.matches(args)) {
-            configureLogging();
-            int code = com.clix.remote.RemoteLoginCommand.run();
-            if (code != 0) System.exit(code);
-            return;
-        }
-        if (com.clix.remote.RemoteClientCommand.matches(args)) {
-            configureLogging();
-            int code = com.clix.remote.RemoteClientCommand.run();
-            if (code != 0) System.exit(code);
+        if (isDeferredRemoteCommand(args)) {
+            System.err.println("远程 Agent 功能暂未开放；当前版本仅支持本地 Agent。直接运行 clix 即可。");
+            System.exit(2);
             return;
         }
         if (isRuntimeServeCommand(args)) {
@@ -257,8 +238,14 @@ public class Main {
         ClixConfig config = ClixConfig.load();
         LlmClient llmClient = LlmClientFactory.createFromConfig(config);
         if (llmClient == null) {
-            System.err.println("❌ 错误: 未找到可用的 API Key");
-            System.err.println("请在 .env 文件中添加 DEEPSEEK_API_KEY、GLM_API_KEY、HUNYUAN_API_KEY、STEP_API_KEY、KIMI_API_KEY、FREELLMAPI_API_KEY、XFYUN_MAAS_API_KEY 或 AGNES_API_KEY");
+            try {
+                Path envPath = UserEnv.ensureExists();
+                System.err.println("❌ 错误: 未找到可用的 API Key");
+                System.err.println("请在全局配置文件中设置模型 API Key：" + envPath);
+                System.err.println("例如：DEEPSEEK_API_KEY=你的密钥");
+            } catch (IOException e) {
+                System.err.println("❌ 错误: 未找到可用的 API Key，且无法创建全局配置文件：" + e.getMessage());
+            }
             System.exit(1);
         }
         AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
@@ -271,26 +258,6 @@ public class Main {
             hitlHandler.setHighRiskConfirmationEnabled(true);
             SessionModeController sessionModes = new SessionModeController(hitlHandler);
             HitlToolRegistry hitlToolRegistry = new HitlToolRegistry(hitlHandler);
-            String processRuntimeNote = "";
-            if (CapabilityDetector.isWindowsHost()) {
-                try {
-                    SupervisorCommandRunner localRunner = SupervisorCommandRunner.forLocalWindows(
-                            hitlToolRegistry.getProjectPath());
-                    hitlToolRegistry.setPlatformCommandRunner(localRunner);
-                    Runtime.getRuntime().addShutdownHook(new Thread(localRunner::close,
-                            "clix-local-process-runtime-shutdown"));
-                    processRuntimeNote = "本地命令执行：原生 PowerShell + Windows Job Object";
-                } catch (RuntimeException e) {
-                    boolean strict = Boolean.parseBoolean(System.getenv("CLIX_STRICT_PROCESS_CONTAINMENT"));
-                    if (strict) {
-                        System.err.println("严格本地进程监管初始化失败，拒绝启动：" + e.getMessage());
-                        return;
-                    }
-                    processRuntimeNote = "Windows Job Object 不可用，命令执行将使用兼容路径：" + e.getMessage();
-                }
-            } else if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("linux")) {
-                processRuntimeNote = "Linux 本地命令执行已启用；cgroup v2 强进程监管暂缓到后续阶段，当前不承诺确定性清理";
-            }
             // auto 模式的 Shell 命令审查：跟随当前会话的供应商，关闭思考的轻量请求；切换模型后自动重建
             com.clix.hitl.LlmApprovalClassifier approvalClassifier = new com.clix.hitl.LlmApprovalClassifier(
                     approvalClassifierClient(llmClientRef, config));
@@ -346,28 +313,19 @@ public class Main {
             renderer.start();
             renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, null)
                     .withSessionMode(sessionModes.current().statusLabel()));
-            ConsoleCancelBridge cancelBridge = ConsoleCancelBridge.startIfConfigured(() -> {
-                Runnable action = ACTIVE_TURN_CANCEL.get();
-                if (action != null) action.run();
-                else System.exit(130); // Ctrl+C at the prompt keeps normal CLI exit semantics.
-            });
-            if (cancelBridge != null) {
-                Runtime.getRuntime().addShutdownHook(new Thread(cancelBridge::close,
-                        "clix-console-cancel-bridge-shutdown"));
-            }
 
-            String startupNote = processRuntimeNote;
+            String startupNote = "";
             try {
                 McpConfigBootstrapResult bootstrapResult = ensureDefaultMcpConfig(Path.of(System.getProperty("user.home")));
                 if (!bootstrapResult.message().isBlank()) {
-                    startupNote = appendStartupNote(startupNote, bootstrapResult.message());
+                    startupNote = bootstrapResult.message();
                 }
                 mcpServerManager.loadConfiguredServers();
                 mcpServerManager.startAll(ui, mcpStartupWait());
                 startupNote = appendStartupNote(startupNote, mcpServerManager.untrustedStartupNote());
                 Runtime.getRuntime().addShutdownHook(new Thread(mcpServerManager::close, "clix-mcp-shutdown"));
             } catch (Exception e) {
-                startupNote = appendStartupNote(startupNote, "MCP 初始化失败: " + e.getMessage());
+                startupNote = "MCP 初始化失败: " + e.getMessage();
             }
             AtMentionExpander mentionExpander = new AtMentionExpander(mcpServerManager);
             LocalPathMentionExpander localPathMentionExpander = new LocalPathMentionExpander(Path.of("."));
@@ -1091,18 +1049,9 @@ public class Main {
                 }
                 SnapshotService snapshotService = reactAgent.getToolRegistry().getSnapshotService();
                 renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, snapshotMode));
-                String localTurnId = java.util.UUID.randomUUID().toString();
-                hitlToolRegistry.beginCommandTurn(localTurnId);
                 String response = runWithCancelSupport(terminal,
                         ui,
-                        () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call),
-                        () -> {
-                            boolean confirmed = hitlToolRegistry.cancelCommandTurn(localTurnId,
-                                    System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(
-                                            com.clix.process.ActiveProcessSupervisor.HARD_DEADLINE_MILLIS));
-                            ui.println(confirmed ? "已确认本地命令监管域清空。"
-                                    : "取消已请求，但当前平台无法确认所有进程均已退出；请先核验执行环境。");
-                        });
+                        () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call));
                 if (!"react".equals(snapshotMode)) {
                     renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                 }
@@ -1408,11 +1357,6 @@ public class Main {
     }
 
     private static String runWithCancelSupport(Terminal terminal, PrintStream out, Callable<String> task) {
-        return runWithCancelSupport(terminal, out, task, null);
-    }
-
-    private static String runWithCancelSupport(Terminal terminal, PrintStream out, Callable<String> task,
-                                              Runnable cancelCommandDomain) {
         CancellationToken token = CancellationContext.startRun();
         ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "clix-agent-runner");
@@ -1420,55 +1364,42 @@ public class Main {
             return thread;
         });
         Future<String> future = executor.submit(task);
-        java.util.concurrent.atomic.AtomicBoolean cancellationRequested =
-                new java.util.concurrent.atomic.AtomicBoolean();
-        Runnable cancel = () -> {
-            if (!cancellationRequested.compareAndSet(false, true)) return;
-            token.cancel();
-            // Cancel the OS process domain before interrupting the Agent worker. The runner's
-            // cancellation path is bounded by the same 10-second absolute deadline.
-            if (cancelCommandDomain != null) {
-                try { cancelCommandDomain.run(); }
-                catch (RuntimeException ignored) { /* interruption still stops the Agent loop */ }
-            }
-            future.cancel(true);
-            executor.shutdownNow();
-        };
-        ACTIVE_TURN_CANCEL.set(cancel);
-        // Raw mode listens for ESC; native clix.exe delivers Ctrl+C through ConsoleCancelBridge.
+        // 进入 raw mode 监听 ESC：raw mode 关 ICANON / ECHO / IEXTEN 但保留 ISIG，所以 Ctrl+C 仍能终止 clix。
         Attributes original = null;
         try {
             if (terminal != null) {
                 try {
                     original = terminal.enterRawMode();
                 } catch (Exception ignored) {
-                    // raw mode 进入失败（非交互终端等），仍可通过 Future 中断和平台监管器取消。
+                    // raw mode 进入失败（非交互终端等），降级为不监听 ESC，靠 Ctrl+C 退出。
                 }
             }
             while (!future.isDone()) {
                 if (original != null && pollEscCancel(terminal)) {
-                    cancel.run();
-                    return "⏹️ 正在取消当前任务。";
+                    token.cancel();
+                    future.cancel(true);
+                    executor.shutdownNow();
+                    return "⏹️ 已请求取消当前任务。";
                 }
                 try {
                     return future.get(150, TimeUnit.MILLISECONDS);
                 } catch (java.util.concurrent.TimeoutException ignored) {
-                    // 继续监听 ESC / native Ctrl+C
+                    // 继续监听 ESC
                 }
             }
             return future.get();
         } catch (CancellationException e) {
             return "⏹️ 已取消当前任务。";
         } catch (InterruptedException e) {
-            cancel.run();
             Thread.currentThread().interrupt();
+            token.cancel();
+            future.cancel(true);
             return "⏹️ 已取消当前任务。";
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             String message = cause == null || cause.getMessage() == null ? "未知错误" : cause.getMessage();
             return "❌ 执行失败: " + message;
         } finally {
-            ACTIVE_TURN_CANCEL.compareAndSet(cancel, null);
             if (terminal != null && original != null) {
                 try {
                     terminal.setAttributes(original);
@@ -3122,6 +3053,13 @@ public class Main {
         };
     }
 
+    static boolean isDeferredRemoteCommand(String[] args) {
+        if (args == null || args.length == 0) return false;
+        String first = args[0].toLowerCase(Locale.ROOT);
+        return "remote".equals(first) || "login".equals(first)
+                || ("serve".equals(first) && args.length > 1 && "--remote".equals(args[1]));
+    }
+
     private static void configureLogging() {
         configureLogProperty(LOG_DIR_PROPERTY, "CLIX_LOG_DIR",
                 Path.of(System.getProperty("user.home"), ".clix", "logs").toString());
@@ -3164,51 +3102,10 @@ public class Main {
     }
 
     private static String loadConfigValue(String key, String defaultValue) {
-        String sysValue = System.getProperty(key);
-        if (sysValue != null && !sysValue.isBlank()) {
-            return sysValue.trim();
-        }
-
-        String envValue = System.getenv(key);
-        if (envValue != null && !envValue.isBlank()) {
-            return envValue.trim();
-        }
-
-        File currentEnv = new File(ENV_FILE);
-        if (currentEnv.exists()) {
-            String value = readValueFromFile(currentEnv, key);
-            if (value != null && !value.isBlank()) {
-                return value.trim();
-            }
-        }
-
-        File homeEnv = new File(System.getProperty("user.home"), ENV_FILE);
-        if (homeEnv.exists()) {
-            String value = readValueFromFile(homeEnv, key);
-            if (value != null && !value.isBlank()) {
-                return value.trim();
-            }
-        }
-
-        return defaultValue;
-    }
-
-    private static String readValueFromFile(File file, String key) {
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty() || line.startsWith("#")) {
-                    continue;
-                }
-                if (line.startsWith(key + "=")) {
-                    return line.substring((key + "=").length()).trim();
-                }
-            }
-        } catch (IOException e) {
-            System.err.println("读取 .env 文件失败: " + e.getMessage());
-        }
-        return null;
+        String systemValue = System.getProperty(key);
+        if (systemValue != null && !systemValue.isBlank()) return systemValue.trim();
+        String value = UserEnv.get(key);
+        return value == null || value.isBlank() ? defaultValue : value.trim();
     }
 
     static ModelSelection resolveModelSelection(String raw, ClixConfig config) {
@@ -3315,11 +3212,11 @@ public class Main {
         String capabilities = "ReAct · Plan · MCP · Browser · Image · Tools · Memory · RAG";
         String state = mcp + " · " + skills + " · ReAct";
         List<String> lines = new ArrayList<>(List.of(
-                "   " + AnsiStyle.section("██████████") + "    " + AnsiStyle.emphasis("clix") + " " + AnsiStyle.section("π") + "  " + AnsiStyle.subtle("v" + VERSION),
-                "   " + AnsiStyle.section("  ██  ██") + "    " + AnsiStyle.subtle(ready),
-                "   " + AnsiStyle.section("  ██  ██") + "    " + AnsiStyle.subtle(state),
-                "   " + AnsiStyle.section("  ██  ██") + "    " + AnsiStyle.subtle(capabilities),
-                "   " + AnsiStyle.section("  ██  ██"),
+                "   " + AnsiStyle.section("██        ██") + "    " + AnsiStyle.emphasis("clix") + " " + AnsiStyle.section("X"),
+                "   " + AnsiStyle.section("  ██    ██") + "    " + AnsiStyle.subtle(ready),
+                "   " + AnsiStyle.section("    ████  ") + "    " + AnsiStyle.subtle(state),
+                "   " + AnsiStyle.section("  ██    ██") + "    " + AnsiStyle.subtle(capabilities),
+                "   " + AnsiStyle.section("██        ██"),
                 "",
                 "Tips for getting started:",
                 "1. Type " + AnsiStyle.emphasis("/") + " for commands and Tab completion",

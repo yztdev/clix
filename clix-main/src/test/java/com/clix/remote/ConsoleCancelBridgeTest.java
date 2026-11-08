@@ -12,14 +12,21 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConsoleCancelBridgeTest {
 
     @Test
-    void startIfConfiguredIsNoOpWithoutEnv() {
-        // POSIX / JLine path: no native launcher pipe configured.
-        assertNull(ConsoleCancelBridge.startIfConfigured(() -> { }));
+    void startIfConfiguredUsesPlatformInterruptPathWithoutLegacyPipe() {
+        // POSIX uses JLine; Windows installs a direct JNA console handler.
+        var bridge = ConsoleCancelBridge.startIfConfigured(() -> { });
+        if (System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).startsWith("windows")) {
+            assertNotNull(bridge);
+            bridge.close();
+        } else {
+            assertNull(bridge);
+        }
     }
 
     @Test

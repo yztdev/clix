@@ -9,17 +9,18 @@ import java.nio.file.Paths;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import com.sun.jna.Native;
+import com.sun.jna.win32.StdCallLibrary;
+import com.sun.jna.win32.W32APIOptions;
 
 /**
  * Out-of-band turn-cancel channel delivered by the native {@code clix.exe} launcher (stage four).
  *
- * <p>On a real Windows console (cmd / PowerShell / Windows Terminal) JLine's {@code SIGINT} hook is
- * unreliable, which is why the design replaces {@code clix.cmd} with a native launcher. The launcher
- * installs {@code SetConsoleCtrlHandler}, and on {@code CTRL_C_EVENT} only enqueues a Win32 event and
- * returns {@code TRUE} (suppressing the default Ctrl+C behaviour that would otherwise tear down the
- * JVM). A worker thread then writes a single byte to a named pipe whose path is passed to the JVM in
- * the {@link #ENV_PIPE} environment variable. This bridge reads that byte and invokes the cancel
- * action, which routes to {@link CurrentTurnController#requestCancel()}.
+ * <p>On Windows, this class registers {@code SetConsoleCtrlHandler} directly through JNA, so the
+ * ordinary {@code clix.cmd} launcher can suppress the console's default Ctrl+C termination and
+ * dispatch cancellation asynchronously. A named-pipe mode remains supported for the legacy native
+ * launcher, but it is not required by the local-first CLI. On POSIX, JLine remains responsible for
+ * terminal interrupts.
  *
  * <p>On POSIX the environment variable is unset, so {@link #startIfConfigured} returns {@code null}
  * and the bridge is a no-op: the existing JLine {@code Terminal.Signal.INT} handler stays in charge.
@@ -40,14 +41,55 @@ public final class ConsoleCancelBridge implements Closeable {
     private final AtomicBoolean closed = new AtomicBoolean();
     /** Stream currently being pumped; closed by {@link #close()} to unblock a pending read. */
     private volatile InputStream stream;
+    private Kernel32Console.HandlerRoutine nativeHandler;
+    private Kernel32Console nativeKernel;
 
-    /** Starts the bridge only when {@link #ENV_PIPE} is configured; returns {@code null} otherwise. */
+    private static final int CTRL_C_EVENT = 0;
+    private static final int CTRL_BREAK_EVENT = 1;
+
+    private interface Kernel32Console extends StdCallLibrary {
+        interface HandlerRoutine extends StdCallLibrary.StdCallCallback {
+            boolean callback(int controlType);
+        }
+        boolean SetConsoleCtrlHandler(HandlerRoutine handler, boolean add);
+    }
+
+    /** Uses the legacy named pipe when supplied; otherwise installs a direct Windows console handler. */
     public static ConsoleCancelBridge startIfConfigured(CancelAction action) {
         String spec = System.getenv(ENV_PIPE);
-        if (spec == null || spec.isBlank()) return null;
+        if (spec != null && !spec.isBlank()) {
+            ConsoleCancelBridge bridge = new ConsoleCancelBridge();
+            bridge.start(action, spec);
+            return bridge;
+        }
+        if (!System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).startsWith("windows")) {
+            return null;
+        }
         ConsoleCancelBridge bridge = new ConsoleCancelBridge();
-        bridge.start(action, spec);
+        if (!bridge.installWindowsHandler(action)) {
+            bridge.close();
+            return null;
+        }
         return bridge;
+    }
+
+    private boolean installWindowsHandler(CancelAction action) {
+        try {
+            nativeKernel = Native.load("kernel32", Kernel32Console.class, W32APIOptions.UNICODE_OPTIONS);
+            nativeHandler = controlType -> {
+                if (controlType != CTRL_C_EVENT && controlType != CTRL_BREAK_EVENT) return false;
+                if (!closed.get()) {
+                    try { reader.execute(action::cancel); }
+                    catch (java.util.concurrent.RejectedExecutionException ignored) { }
+                }
+                return true; // suppress the JVM's default console termination for Ctrl+C / Ctrl+Break
+            };
+            return nativeKernel.SetConsoleCtrlHandler(nativeHandler, true);
+        } catch (LinkageError | RuntimeException e) {
+            nativeHandler = null;
+            nativeKernel = null;
+            return false;
+        }
     }
 
     private void start(CancelAction action, String spec) {
@@ -99,6 +141,12 @@ public final class ConsoleCancelBridge implements Closeable {
         InputStream in = stream;
         if (in != null) {
             try { in.close(); } catch (IOException ignored) { }
+        }
+        if (nativeKernel != null && nativeHandler != null) {
+            try { nativeKernel.SetConsoleCtrlHandler(nativeHandler, false); }
+            catch (RuntimeException ignored) { }
+            nativeHandler = null;
+            nativeKernel = null;
         }
         reader.shutdownNow();
     }

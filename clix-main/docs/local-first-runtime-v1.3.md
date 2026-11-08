@@ -12,7 +12,7 @@ V1.3 先把 CLIX 做成类似 Claude Code / Codex CLI 的本地优先 Agent：
 - 模型请求仍可访问远程 LLM API；模型 API 不决定工具执行位置。
 - Windows 本地命令优先使用原生 PowerShell，并通过 Windows Job Object 监管。
 - Linux 本地命令继续使用现有兼容执行路径；Linux cgroup v2 进程监管明确延期，不在本阶段宣称强监管或确定性清理。
-- `clix remote` 保留为显式的远程 Agent 模式，不删除现有 Remote Agent 功能。
+- 当前版本只开放本地 Agent；远程 Agent、远程登录和远程服务启动入口全部暂时关闭，后续版本重新设计后再开放。
 
 ## 2. 非目标
 
@@ -51,12 +51,11 @@ Linux 路径在 V1.3 不报告 cgroup 强监管；后续版本再引入并验收
 
 ## 4. 入口语义
 
-- `clix`：本地 Agent 模式。
-- `clix remote`：连接已配置的 Remote Agent Server。
-- `clix login`：配置远程 Agent 登录凭证。
+- `clix`：通过安装目录中的 `clix.cmd` 启动本地 Agent。
+- `clix remote`、`clix login`、`clix serve --remote`：本阶段明确不可用，统一提示远程功能尚未开放。
 - `clix app-server`：未来可选能力，本阶段不交付。
 
-Windows 原生启动器 `clix.exe` 的无参数行为必须与上述语义一致。旧版 `clix.cmd` 需要通过安装脚本移除并由新版原生启动器替换。
+Windows 当前只使用 `clix.cmd` 启动本地 JAR；启动脚本调用安装目录内置的 Java Runtime，不要求用户安装 JDK、Maven、CMake 或 C/C++ 编译器。原生 C 启动器本阶段不参与构建和安装。
 
 ## 5. Windows 本地进程监管
 
@@ -86,7 +85,7 @@ Windows 原生启动器 `clix.exe` 的无参数行为必须与上述语义一致
 
 ## 8. 兼容性与迁移原则
 
-- 不删除 `RemoteSocketServer`、`RemoteAgentSession`、`RemoteClientConnection` 或 Remote Client 工具链。
+- 远程 Java 实现暂时保留在源码中以便后续恢复，但不注册为 CLI 命令、不进入当前安装包的使用流程；本阶段不验收远程功能。
 - 不改变 Agent Core、ReAct、Plan-and-Execute、Multi-Agent 的算法实现。
 - 共享 `ToolRegistry`、`PlatformCommandRunner`、`ActiveProcessSupervisor` 和 `ProcessContainment`。
 - 保留既有 67 项远程取消专项测试作为回归基线；新增本地 ToolRegistry 生命周期和 Windows argv 包装测试。
@@ -106,8 +105,8 @@ Windows 原生启动器 `clix.exe` 的无参数行为必须与上述语义一致
 
 ### Windows 实机
 
-- [ ] `clix` 默认进入本地 Agent，不要求远程登录。
-- [ ] `clix remote` 仍能进入远程 Agent 模式。
+- [ ] `clix.cmd` 通过内置 Java Runtime 启动本地 Agent，不要求远程登录或用户预装 Java。
+- [ ] `clix remote`、`clix login`、`clix serve --remote` 均被明确拒绝，不会启动远程服务或连接远程 Agent。
 - [ ] `execute_command` 实际运行在 Windows PowerShell。
 - [ ] 命令进程在启动后立即归属 Job Object。
 - [ ] 第一次 Ctrl+C 取消当前 Turn，Job Object 中的进程域清空。

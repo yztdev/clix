@@ -1,5 +1,6 @@
 package com.clix.web;
 
+import com.clix.config.UserEnv;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -70,33 +71,7 @@ public final class SearchProviderFactory {
     }
 
     private static String readEnv(String key) {
-        String fromEnv = System.getenv(key);
-        if (fromEnv != null && !fromEnv.isBlank()) {
-            return fromEnv.trim();
-        }
-        String fromProp = System.getProperty(key);
-        if (fromProp != null && !fromProp.isBlank()) {
-            return fromProp.trim();
-        }
-        return readFromDotEnv(key);
+        return UserEnv.get(key);
     }
 
-    private static String readFromDotEnv(String key) {
-        File[] envFiles = {new File(".env"), new File(System.getProperty("user.home"), ".env")};
-        for (File envFile : envFiles) {
-            if (!envFile.exists()) continue;
-            try (BufferedReader reader = new BufferedReader(new FileReader(envFile))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    line = line.trim();
-                    if (line.isEmpty() || line.startsWith("#")) continue;
-                    if (line.startsWith(key + "=")) {
-                        return line.substring((key + "=").length()).trim();
-                    }
-                }
-            } catch (Exception ignored) {
-            }
-        }
-        return null;
-    }
 }

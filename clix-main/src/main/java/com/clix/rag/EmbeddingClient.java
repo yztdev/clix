@@ -1,5 +1,6 @@
 package com.clix.rag;
 
+import com.clix.config.UserEnv;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -298,25 +299,10 @@ public class EmbeddingClient {
             return value.trim();
         }
 
-        // 3. 读取当前工作目录的 .env 文件
-        java.nio.file.Path envFile = java.nio.file.Path.of(".env");
-
-        if (java.nio.file.Files.exists(envFile)) {
-            try {
-                for (String line : java.nio.file.Files.readAllLines(envFile)) {
-                    line = line.trim();
-
-                    if (line.isEmpty() || line.startsWith("#")) {
-                        continue;
-                    }
-
-                    if (line.startsWith(key + "=")) {
-                        return line.substring(key.length() + 1).trim();
-                    }
-                }
-            } catch (java.io.IOException e) {
-                System.err.println("读取 .env 失败: " + e.getMessage());
-            }
+        // 3. Read the single global CLIX env file.
+        value = UserEnv.get(key);
+        if (value != null && !value.isBlank()) {
+            return value.trim();
         }
 
         return defaultValue;

@@ -13,7 +13,7 @@ import com.clix.config.ClixConfig;
  * - 持久化到 config.json
  * - 热重载（修改后立即生效）
  *
- * <p>当前先提供只读配置总览和 provider 快速切换，具体 API Key 编辑仍通过 config.json / .env。
+ * <p>当前先提供只读配置总览和 provider 快速切换，具体 API Key 编辑仍通过 config.json / ~/.clix/.env。
  */
 public class TuiConfigPanel {
 

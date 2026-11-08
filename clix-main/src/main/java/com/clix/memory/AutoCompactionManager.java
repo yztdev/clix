@@ -1,6 +1,7 @@
 package com.clix.memory;
 
 import com.clix.llm.LlmClient;
+import com.clix.config.UserEnv;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -134,9 +135,7 @@ public class AutoCompactionManager {
         if (property != null) return truthy(property);
         String env = System.getenv(SESSION_MEMORY_ENV);
         if (env != null) return truthy(env);
-        String projectDotEnv = readDotEnv(new File(".env"), SESSION_MEMORY_ENV);
-        if (projectDotEnv != null) return truthy(projectDotEnv);
-        return truthy(readDotEnv(new File(System.getProperty("user.home"), ".env"), SESSION_MEMORY_ENV));
+        return truthy(UserEnv.get(SESSION_MEMORY_ENV));
     }
 
     private static boolean truthy(String value) {
@@ -146,20 +145,5 @@ public class AutoCompactionManager {
                 || "yes".equals(normalized) || "on".equals(normalized);
     }
 
-    private static String readDotEnv(File file, String key) {
-        if (file == null || !file.isFile()) return null;
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String trimmed = line.trim();
-                if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
-                if (trimmed.startsWith(key + "=")) {
-                    return trimmed.substring(key.length() + 1).trim();
-                }
-            }
-        } catch (IOException ignored) {
-            // 配置读取失败时保持默认关闭，完整摘要路径仍然可用。
-        }
-        return null;
-    }
+
 }

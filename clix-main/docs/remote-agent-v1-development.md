@@ -1,3 +1,5 @@
+> 当前状态（2026-11-08）：本文描述的远程 Agent / 登录入口在 Local-first 阶段暂时关闭；相关源码保留，但 `clix remote`、`clix login`、`clix serve --remote` 不会由 CLI 分派。待后续远程架构重新设计后再恢复。
+
 # V1 开发文档：连接与本地工具
 
 状态：开发中，尚未交付。范围和用户体验以 [首版交付方案](remote-agent-v1-delivery-plan.md) 为准；当前任务取消与会话续接按 [专项开发文档](remote-agent-cancellation-session-continuity-development.md) 实施。前置条件是确定服务器地址、用户凭证发放方式，并处理影响 Windows 本地工具的已知测试问题。

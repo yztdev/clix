@@ -109,14 +109,19 @@ public class ClixConfig {
     }
 
     public static ClixConfig load() {
+        ClixConfig config = new ClixConfig();
         if (Files.exists(CONFIG_FILE)) {
             try {
-                return mapper.readValue(CONFIG_FILE.toFile(), ClixConfig.class);
+                config = mapper.readValue(CONFIG_FILE.toFile(), ClixConfig.class);
             } catch (IOException e) {
                 System.err.println("⚠️ 配置文件读取失败，使用默认配置: " + e.getMessage());
             }
         }
-        return new ClixConfig();
+        String envProvider = UserEnv.get("LLM_PROVIDER");
+        if (envProvider != null && !envProvider.isBlank()) {
+            config.setDefaultProvider(envProvider.trim().toLowerCase(Locale.ROOT));
+        }
+        return config;
     }
 
     public void save() {
@@ -302,20 +307,6 @@ public class ClixConfig {
     }
 
     private static String readFromDotEnv(String key) {
-        File[] envFiles = { new File(".env"), new File(System.getProperty("user.home"), ".env") };
-        for (File envFile : envFiles) {
-            if (!envFile.exists()) continue;
-            try (BufferedReader reader = new BufferedReader(new FileReader(envFile))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    line = line.trim();
-                    if (line.isEmpty() || line.startsWith("#")) continue;
-                    if (line.startsWith(key + "=")) {
-                        return line.substring((key + "=").length()).trim();
-                    }
-                }
-            } catch (IOException ignored) {}
-        }
-        return null;
+        return UserEnv.get(key);
     }
 }

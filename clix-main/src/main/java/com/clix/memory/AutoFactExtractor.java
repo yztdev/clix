@@ -3,6 +3,7 @@ package com.clix.memory;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.clix.llm.LlmClient;
+import com.clix.config.UserEnv;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -148,29 +149,12 @@ public final class AutoFactExtractor {
     public static boolean enabledByConfiguration() {
         String raw = System.getProperty(ENABLED_PROPERTY);
         if (raw == null || raw.isBlank()) raw = System.getenv(ENABLED_ENV);
-        if (raw == null || raw.isBlank()) raw = readDotEnv(new File(".env"));
-        if (raw == null || raw.isBlank()) {
-            raw = readDotEnv(new File(System.getProperty("user.home"), ".env"));
-        }
+        if (raw == null || raw.isBlank()) raw = UserEnv.get(ENABLED_ENV);
         if (raw == null || raw.isBlank()) return true;
         String normalized = raw.trim().toLowerCase(Locale.ROOT);
         return !("false".equals(normalized) || "0".equals(normalized)
                 || "no".equals(normalized) || "off".equals(normalized));
     }
 
-    private static String readDotEnv(File file) {
-        if (!file.isFile()) return null;
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String trimmed = line.trim();
-                if (trimmed.startsWith(ENABLED_ENV + "=")) {
-                    return trimmed.substring(ENABLED_ENV.length() + 1).trim();
-                }
-            }
-        } catch (IOException ignored) {
-            // The CLI retains its default when optional local configuration cannot be read.
-        }
-        return null;
-    }
+
 }

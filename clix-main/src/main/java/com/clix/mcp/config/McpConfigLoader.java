@@ -1,6 +1,7 @@
 package com.clix.mcp.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.clix.config.UserEnv;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
@@ -180,44 +181,9 @@ public class McpConfigLoader {
     }
 
     private String readConfiguredValue(String key) {
-        String fromEnv = System.getenv(key);
-        if (fromEnv != null && !fromEnv.isBlank()) {
-            return fromEnv.trim();
-        }
-        String fromProp = System.getProperty(key);
-        if (fromProp != null && !fromProp.isBlank()) {
-            return fromProp.trim();
-        }
-        String fromProjectEnv = readFromDotEnv(projectDir.resolve(".env"), key);
-        if (fromProjectEnv != null && !fromProjectEnv.isBlank()) {
-            return fromProjectEnv.trim();
-        }
-        String fromHomeEnv = readFromDotEnv(Path.of(System.getProperty("user.home"), ".env"), key);
-        if (fromHomeEnv != null && !fromHomeEnv.isBlank()) {
-            return fromHomeEnv.trim();
-        }
-        return null;
+        return UserEnv.get(key);
     }
 
-    private static String readFromDotEnv(Path file, String key) {
-        if (file == null || !Files.exists(file)) {
-            return null;
-        }
-        try (BufferedReader reader = new BufferedReader(new FileReader(file.toFile()))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty() || line.startsWith("#")) {
-                    continue;
-                }
-                if (line.startsWith(key + "=")) {
-                    return stripOptionalQuotes(line.substring((key + "=").length()).trim());
-                }
-            }
-        } catch (IOException ignored) {
-        }
-        return null;
-    }
 
     private static String stripOptionalQuotes(String value) {
         if (value == null || value.length() < 2) {
