@@ -50,6 +50,9 @@ public class WechatAgentSession implements AutoCloseable {
         registry.configureCommandSandbox(com.clix.tool.CommandSandboxMode.fromConfiguration(), workspace);
         this.renderer = new WechatTerminalRenderer(localRenderer, sender);
         this.agent = new Agent(client, registry);
+        // 微信通道也可能启动 execute_command；退出时同样收掉进程树。
+        Runtime.getRuntime().addShutdownHook(new Thread(
+                registry::shutdown, "clix-wechat-command-shutdown"));
         try {
             this.agent.setConversationLedger(ConversationLedger.openDefault(
                     Path.of(System.getProperty("user.home"))));

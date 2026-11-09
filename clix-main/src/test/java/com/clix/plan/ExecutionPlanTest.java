@@ -120,4 +120,25 @@ class ExecutionPlanTest {
         assertEquals(List.of(task1, task2, task3, task4), batches.get(0));
         assertEquals(List.of(task5), batches.get(1));
     }
+
+    @Test
+    void cancelRemainingClosesRunningAndPendingTasks() {
+        ExecutionPlan plan = new ExecutionPlan("plan_7", "demo");
+        Task running = new Task("task_1", "read pom", Task.TaskType.FILE_READ);
+        Task completed = new Task("task_2", "list main", Task.TaskType.COMMAND);
+        Task pending = new Task("task_3", "summarize", Task.TaskType.ANALYSIS, List.of("task_2"));
+        plan.addTask(running);
+        plan.addTask(completed);
+        plan.addTask(pending);
+
+        running.markStarted();
+        completed.markCompleted("done");
+        plan.markCancelled();
+        plan.cancelRemaining("用户取消");
+
+        assertEquals(Task.TaskStatus.FAILED, running.getStatus(), "正在跑的任务取消后应标失败");
+        assertEquals("用户取消", running.getError());
+        assertEquals(Task.TaskStatus.COMPLETED, completed.getStatus(), "已完成的任务不应被改写");
+        assertEquals(Task.TaskStatus.SKIPPED, pending.getStatus(), "未开始的任务应标跳过");
+    }
 }

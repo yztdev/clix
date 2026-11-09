@@ -69,7 +69,23 @@ public class PromptAssembler {
         LocalDate date = configuredRuntimeDate(zone);
         return "## Runtime Context\n\n"
                 + "- 当前日期: " + date + "\n"
-                + "- 当前时区: " + zone;
+                + "- 当前时区: " + zone + "\n"
+                + "- 当前操作系统: " + System.getProperty("os.name", "unknown") + " "
+                + System.getProperty("os.version", "") + " ("
+                + System.getProperty("os.arch", "unknown") + ")\n"
+                + "- 命令解释器: " + commandShellDescription();
+    }
+
+    /**
+     * 告诉模型 execute_command 实际由哪个 shell 执行。
+     * Windows 本地命令走 PowerShell；PowerShell 5.1 不支持 && / ||，模型按 bash 写会直接语法错误。
+     */
+    private static String commandShellDescription() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (os.startsWith("windows")) {
+            return "PowerShell（默认 5.1；5.1 不支持 && / ||，用 ; 分隔语句）";
+        }
+        return "bash（支持 && / ||）";
     }
 
     private static ZoneId configuredRuntimeZone() {

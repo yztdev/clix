@@ -116,6 +116,8 @@ stdio 的 stdout 按行处理：不是 JSON 的行（server 往 stdout 打的日
 - 流式输出 reasoning_content 和 content；inline ReAct 用一块固定高度的 live thinking 区动态预览 reasoning，同一次输入只把完整的 reasoning 引用块写进 transcript 一次；live 区只能清理自己占用的行，免得覆盖旧输出
 - inline 流式回答开头用一个不显眼的 `▪` 标记，不再输出醒目的标题；plain 模式或非流式的备用路径仍可用传统的 reasoning + answer 文本
 - `TerminalMarkdownRenderer` 渲染 Markdown 表格时按终端宽度分配列宽，长内容在单元格内部换行；CJK 字符按显示宽度计算，免得表格行被终端自动折断后错位
+- 任务运行中 `Ctrl+C` 或 `ESC` 走同一条取消链路：置 `CancellationContext`、中断执行线程、`cancelInFlightCalls()` abort 在飞请求。第一次 `Ctrl+C` 只取消，2 秒内第二次强制退出；空闲提示符下第一次 `Ctrl+C` 清输入，5 秒内第二次退出
+- 取消时 ReAct 会在历史末尾追加 `[CLIX_INTERRUPTED]` 内部消息（`InternalUserMessages` 排除在用户轮次与摘要之外）。因为 `cancelInFlightCalls()` 会让模型客户端以 `IOException` 结束，取消判断也要覆盖这条异常路径，不能把它报成“调用 LLM 失败”
 
 ### 长上下文
 

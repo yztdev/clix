@@ -22,6 +22,7 @@ class CompactorIgnoresInternalUserMessagesTest {
         history.add(skillInjection("web-access"));
         addRound(history, "Q2");
         history.add(LlmClient.Message.user(InternalUserMessages.RUNAWAY_REMINDER_PREFIX + " 换个思路"));
+        history.add(LlmClient.Message.user(InternalUserMessages.INTERRUPT_MARKER + " 用户中断了本轮任务"));
         addRound(history, "Q3");
 
         assertEquals(3, ConversationHistoryCompactor.userIndices(history, 1).size());

@@ -355,6 +355,12 @@ public class PlanExecuteAgent {
             }
             return outcome.result();
         } catch (Exception e) {
+            if (CancellationContext.isCancelled()) {
+                // 主动 abort 在飞请求后，模型客户端会以 IOException 结束；这属于取消，不是失败。
+                log.info("Plan run cancelled while a request was in flight");
+                conversationLedger.appendEvent("run_cancelled", "plan", "plan-agent", "aborted_in_flight", Map.of());
+                return CANCELLED_PLAN_MESSAGE;
+            }
             log.error("Plan run failed", e);
             String errorMessage = "❌ 执行失败: " + e.getMessage();
             conversationLedger.appendMessage(
@@ -439,6 +445,7 @@ public class PlanExecuteAgent {
         while (!stopAfterBatch) {
             if (CancellationContext.isCancelled()) {
                 plan.markCancelled();
+                recordPlanCancelled(plan);
                 return CANCELLED_PLAN_MESSAGE;
             }
             List<Task> executableTasks = getExecutableTasksInOrder(plan);
@@ -451,6 +458,7 @@ public class PlanExecuteAgent {
             // 取消会打断本轮正在执行的任务，这些中断不是任务本身失败，不能再触发重新规划
             if (CancellationContext.isCancelled()) {
                 plan.markCancelled();
+                recordPlanCancelled(plan);
                 return CANCELLED_PLAN_MESSAGE;
             }
             for (TaskExecutionResult batchResult : batchResults) {
@@ -523,6 +531,35 @@ public class PlanExecuteAgent {
             return "✅ 计划执行完成！";
         }
         return "✅ 计划执行完成！\n" + planSummary;
+    }
+
+    /**
+     * 取消时收尾任务状态并写一条可追溯的事件：计划对象随后会被丢弃，
+     * 这是最后能把“哪些完成了、哪些被取消”留在会话记录里的时机。
+     */
+    private void recordPlanCancelled(ExecutionPlan plan) {
+        plan.cancelRemaining("用户取消");
+        List<String> completed = new ArrayList<>();
+        List<String> failed = new ArrayList<>();
+        List<String> skipped = new ArrayList<>();
+        for (String id : plan.getExecutionOrder()) {
+            Task task = plan.getTask(id);
+            if (task == null) {
+                continue;
+            }
+            switch (task.getStatus()) {
+                case COMPLETED -> completed.add(id);
+                case FAILED -> failed.add(id);
+                case SKIPPED -> skipped.add(id);
+                default -> {
+                    // PENDING / RUNNING 在 cancelRemaining 后不应再出现
+                }
+            }
+        }
+        conversationLedger.appendEvent("run_cancelled", "plan", "plan-agent", "during_execution",
+                Map.of("completed", List.copyOf(completed),
+                        "failed", List.copyOf(failed),
+                        "skipped", List.copyOf(skipped)));
     }
 
     private List<Task> getExecutableTasksInOrder(ExecutionPlan plan) {

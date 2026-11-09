@@ -105,7 +105,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
@@ -140,6 +143,10 @@ public class Main {
     private static final Pattern SENSITIVE_ASSIGNMENT = Pattern.compile(
             "(?i)((?:api[_-]?key|authorization|password|passwd|secret|token)\\s*[=:]\\s*)(\\S+)");
     private static final int CTRL_O = 15;
+    /** 空闲提示符下第一次 Ctrl+C 只清输入，窗口内第二次才退出。 */
+    private static final long EXIT_ARM_WINDOW_NANOS = TimeUnit.SECONDS.toNanos(5);
+    /** 任务运行中第一次 Ctrl+C 取消，窗口内第二次强制退出。 */
+    private static final long TASK_FORCE_EXIT_WINDOW_NANOS = TimeUnit.SECONDS.toNanos(2);
     private static final String DEFAULT_CHROME_DEVTOOLS_MCP_JSON = """
             {
               "mcpServers": {
@@ -364,6 +371,10 @@ public class Main {
             startupNote = appendStartupNote(startupNote, sandboxStatus.message());
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
+            // 正常退出、Ctrl+C 强退、关闭控制台时都尽量收掉 execute_command 启动的进程树；
+            // MCP / 后台任务 / 微信通道已有各自的 shutdown hook。
+            Runtime.getRuntime().addShutdownHook(new Thread(
+                    reactAgent.getToolRegistry()::shutdown, "clix-command-shutdown"));
             reactAgent.getMemoryManager().setAutoFactExtractionEnabled(
                     com.clix.memory.AutoFactExtractor.enabledByConfiguration());
             reactAgent.setConversationLedger(conversationLedger);
@@ -429,6 +440,9 @@ public class Main {
                     .normalize()
                     .toString();
 
+            // 空闲时 Ctrl+C 的两段式退出：第一次清输入并装填窗口，窗口内第二次才退出。
+            long[] exitArmedUntil = {0L};
+
             while (true) {
                 refreshTerminalColumns(terminal);
                 List<String> mcpNotices = mcpServerManager.drainNotices();
@@ -442,10 +456,18 @@ public class Main {
                     promptInput = readPromptInput(terminal, lineReader, renderer,
                             nextTaskUsePlanMode || nextTaskUseTeamMode, spaciousPrompt);
                 } catch (UserInterruptException e) {
-                    continue;  // Ctrl+C 跳过
+                    long now = System.nanoTime();
+                    if (now < exitArmedUntil[0]) {
+                        ui.println("\n已确认退出。");
+                        break;
+                    }
+                    exitArmedUntil[0] = now + EXIT_ARM_WINDOW_NANOS;
+                    ui.println("\n已清空当前输入；5 秒内再按一次 Ctrl+C 退出。");
+                    continue;
                 } catch (EndOfFileException e) {
                     break;  // Ctrl+D 退出
                 }
+                exitArmedUntil[0] = 0L;
                 if (renderer instanceof InlineRenderer inline) {
                     inline.clearAcceptedInput(promptInput.text());
                 }
@@ -861,6 +883,7 @@ public class Main {
                             runStatus = runWithCancelSupport(
                                     terminal,
                                     ui,
+                                    llmClientRef::get,
                                     () -> {
                                         resultRef.set(runner.run(
                                                 parsed.options(),
@@ -1051,6 +1074,7 @@ public class Main {
                 renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, snapshotMode));
                 String response = runWithCancelSupport(terminal,
                         ui,
+                        llmClientRef::get,
                         () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call));
                 if (!"react".equals(snapshotMode)) {
                     renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
@@ -1356,7 +1380,9 @@ public class Main {
         return TerminalMarkdownRenderer.render(markdown, terminalColumns);
     }
 
-    private static String runWithCancelSupport(Terminal terminal, PrintStream out, Callable<String> task) {
+    private static String runWithCancelSupport(Terminal terminal, PrintStream out,
+                                               Supplier<LlmClient> currentClient,
+                                               Callable<String> task) {
         CancellationToken token = CancellationContext.startRun();
         ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "clix-agent-runner");
@@ -1364,8 +1390,26 @@ public class Main {
             return thread;
         });
         Future<String> future = executor.submit(task);
-        // 进入 raw mode 监听 ESC：raw mode 关 ICANON / ECHO / IEXTEN 但保留 ISIG，所以 Ctrl+C 仍能终止 clix。
+        AtomicBoolean cancelledByInterrupt = new AtomicBoolean(false);
+        AtomicLong lastInterruptNanos = new AtomicLong(0L);
+        Runnable cancelRun = () -> {
+            token.cancel();
+            // 先取消 future，保证主线程看到的是“已取消”而不是执行线程随后抛出的 IO 错误。
+            future.cancel(true);
+            LlmClient client = currentClient == null ? null : currentClient.get();
+            if (client != null) {
+                try {
+                    // Abort the HTTP call that is already in flight, not just the local loop.
+                    client.cancelInFlightCalls();
+                } catch (RuntimeException ignored) {
+                    // A failing abort hook must not break the cancellation path itself.
+                }
+            }
+        };
+        // 进入 raw mode 监听 ESC：raw mode 关 ICANON / ECHO / IEXTEN 但保留 ISIG，所以 Ctrl+C 仍会产生 SIGINT。
+        // 任务期间临时接管 INT：第一次取消，窗口内第二次强制退出；任务结束后恢复原 handler。
         Attributes original = null;
+        Terminal.SignalHandler previousIntHandler = null;
         try {
             if (terminal != null) {
                 try {
@@ -1374,10 +1418,18 @@ public class Main {
                     // raw mode 进入失败（非交互终端等），降级为不监听 ESC，靠 Ctrl+C 退出。
                 }
             }
+            previousIntHandler = installInterruptHandler(terminal, () -> {
+                long now = System.nanoTime();
+                long last = lastInterruptNanos.getAndSet(now);
+                if (shouldForceExit(last, now)) {
+                    System.exit(130);
+                }
+                cancelledByInterrupt.set(true);
+                cancelRun.run();
+            });
             while (!future.isDone()) {
                 if (original != null && pollEscCancel(terminal)) {
-                    token.cancel();
-                    future.cancel(true);
+                    cancelRun.run();
                     executor.shutdownNow();
                     return "⏹️ 已请求取消当前任务。";
                 }
@@ -1389,17 +1441,19 @@ public class Main {
             }
             return future.get();
         } catch (CancellationException e) {
-            return "⏹️ 已取消当前任务。";
+            return cancelledByInterrupt.get()
+                    ? "⏹️ 已取消当前任务（2 秒内再按一次 Ctrl+C 强制退出）。"
+                    : "⏹️ 已取消当前任务。";
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            token.cancel();
-            future.cancel(true);
+            cancelRun.run();
             return "⏹️ 已取消当前任务。";
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             String message = cause == null || cause.getMessage() == null ? "未知错误" : cause.getMessage();
             return "❌ 执行失败: " + message;
         } finally {
+            restoreInterruptHandler(terminal, previousIntHandler);
             if (terminal != null && original != null) {
                 try {
                     terminal.setAttributes(original);
@@ -1409,6 +1463,35 @@ public class Main {
             CancellationContext.clear(token);
             executor.shutdownNow();
         }
+    }
+
+    /** 任务期间临时把 SIGINT 接到取消逻辑；终端为空或不支持信号时返回 SIG_DFL（保持原行为）。 */
+    private static Terminal.SignalHandler installInterruptHandler(Terminal terminal, Runnable onInterrupt) {
+        if (terminal == null) {
+            return Terminal.SignalHandler.SIG_DFL;
+        }
+        try {
+            Terminal.SignalHandler previous = terminal.handle(Terminal.Signal.INT, signal -> onInterrupt.run());
+            return previous == null ? Terminal.SignalHandler.SIG_DFL : previous;
+        } catch (Throwable ignored) {
+            return Terminal.SignalHandler.SIG_DFL;
+        }
+    }
+
+    private static void restoreInterruptHandler(Terminal terminal, Terminal.SignalHandler previous) {
+        if (terminal == null || previous == null) {
+            return;
+        }
+        try {
+            terminal.handle(Terminal.Signal.INT, previous);
+        } catch (Throwable ignored) {
+            // 恢复失败只影响后续 Ctrl+C 的默认行为，不影响任务结果
+        }
+    }
+
+    /** 任务中第二次 Ctrl+C 的判定：窗口内再次收到 INT 就强制退出。 */
+    static boolean shouldForceExit(long lastNanos, long nowNanos) {
+        return lastNanos != 0L && nowNanos - lastNanos <= TASK_FORCE_EXIT_WINDOW_NANOS;
     }
 
     /** 计划审阅、工具审批正在读终端时跳过本轮 ESC 监听，否则两边会互相抢按键。 */

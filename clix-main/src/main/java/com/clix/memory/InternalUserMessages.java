@@ -6,9 +6,10 @@ import java.util.LinkedHashSet;
 import java.util.Set;
 
 /**
- * 运行时以 user 角色注入、但不是用户输入的消息：load_skill 的正文注入和 runaway guard 提醒。
+ * 运行时以 user 角色注入、但不是用户输入的消息：load_skill 的正文注入、runaway guard 提醒，
+ * 以及任务被中断后的收尾标记。
  *
- * <p>压缩器按 user 消息切分轮次，必须先把这两类排除掉：否则一次 load_skill 就多出一个假轮次，
+ * <p>压缩器按 user 消息切分轮次，必须先把这些排除掉：否则一次 load_skill 就多出一个假轮次，
  * 挤掉真实的用户上下文；Skill 正文还会被喂给摘要模型压成一两句，甚至被记成用户要求。
  * 压缩时 Skill 注入直接移出上下文，模型需要时重新 load_skill。</p>
  */
@@ -20,12 +21,21 @@ public final class InternalUserMessages {
     public static final String SKILL_SECTION_PREFIX = "## 已加载 Skill：";
     /** {@code RunawayGuard} 提醒的固定前缀，提示词里也按这个前缀向模型解释。 */
     public static final String RUNAWAY_REMINDER_PREFIX = "[runaway guard]";
+    /**
+     * 用户中断任务后写入的收尾标记。它不是用户的新请求，只是告诉模型上一轮没有最终回复，
+     * 避免下一轮把“没有答复”误判成任务已经完成。
+     */
+    public static final String INTERRUPT_MARKER = "[CLIX_INTERRUPTED]";
 
     private InternalUserMessages() {
     }
 
     public static boolean isSkillInjection(LlmClient.Message message) {
         return startsWith(message, SKILL_INJECTION_MARKER);
+    }
+
+    public static boolean isInterruptMarker(LlmClient.Message message) {
+        return startsWith(message, INTERRUPT_MARKER);
     }
 
     /** Skill 注入消息里包含的 Skill 名；不是 Skill 注入时为空集合。 */
@@ -50,7 +60,7 @@ public final class InternalUserMessages {
 
     /** 不应计入用户轮次、也不应交给摘要模型的内部消息。 */
     public static boolean isInternal(LlmClient.Message message) {
-        return isSkillInjection(message) || isRuntimeReminder(message);
+        return isSkillInjection(message) || isRuntimeReminder(message) || isInterruptMarker(message);
     }
 
     private static boolean startsWith(LlmClient.Message message, String prefix) {

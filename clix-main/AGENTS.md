@@ -89,6 +89,13 @@ src/main/java/com/clix/
 - 工具执行前按 JSON Schema 校验参数（`ToolArgumentValidator`），不合格就把字段级错误还给模型。内置工具只拦结构问题（缺参数、传了对象 / 数组、不在 enum 里），单值参数的类型和 null 仍由工具自己解析，评测复算依赖这套语义；MCP 工具按 server 的原始 Schema 严格校验，不能用清洗后给模型看的那份
 - 工具结果放进对话前，统一用 `ToolResultBoundary.wrap()` 包一层 `trust="untrusted-data"` 标记，表示这是外部数据，不代表允许做任何事；太大的结果由 `ToolResultOffloader` 写进 `.clix/tool-outputs/`
 
+### 中断与取消
+
+- 任务运行中第一次 `Ctrl+C` 或 `ESC` 取消当前 Turn，回到提示符；2 秒内第二次 `Ctrl+C` 强制退出。空闲提示符下第一次 `Ctrl+C` 清空输入并装填 5 秒退出窗口，窗口内再按一次退出
+- 取消走 `CancellationContext` + 线程 interrupt 的协作式路径：主线程只负责置标志、中断执行线程并 `cancelInFlightCalls()` abort 已发出的 HTTP 请求，各层在自己边界处检查；不要新增强制 `Thread.stop()`
+- 取消时 ReAct 会往历史末尾追加 `[CLIX_INTERRUPTED]` 内部消息（`InternalUserMessages` 排除在用户轮次和摘要之外），让下一轮知道上一轮没有最终回复；Plan/Team 取消会收尾任务/步骤状态并写 `run_cancelled` 事件
+- 命令取消沿用 `terminateCommandTree`（`ProcessHandle.descendants()` 逆序强杀 + 根进程）；它抓不到已经脱离进程树的进程，改这块前先看 `docs/local-only-cli-release.md` 的验收说明
+
 ### HITL（人工确认）与安全策略
 
 - 检查顺序：TurnToolPolicy（网址来源等本轮工具策略）→ HitlToolRegistry → ToolRegistry（参数校验）→ PathGuard / CommandGuard。被安全策略拒绝的操作，用户也无法批准

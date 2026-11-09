@@ -8,6 +8,7 @@ import com.clix.history.ConversationLedger;
 import com.clix.lsp.LspDiagnosticReport;
 import com.clix.memory.AutoCompactionManager;
 import com.clix.memory.ExplicitMemoryHints;
+import com.clix.memory.InternalUserMessages;
 import com.clix.memory.MemoryManager;
 import com.clix.prompt.PromptAssembler;
 import com.clix.prompt.PromptContext;
@@ -228,6 +229,7 @@ public class Agent {
         while (true) {
             if (CancellationContext.isCancelled()) {
                 log.info("ReAct run cancelled before iteration");
+                appendInterruptMarker();
                 pushStatus(budget, startNanos, "idle");
                 return "⏹️ 已取消当前任务。";
             }
@@ -260,6 +262,7 @@ public class Agent {
                 if (CancellationContext.isCancelled()) {
                     log.info("ReAct run cancelled after LLM response");
                     streamRenderer.finish();
+                    appendInterruptMarker();
                     pushStatus(budget, startNanos, "idle");
                     return "⏹️ 已取消当前任务。";
                 }
@@ -343,6 +346,14 @@ public class Agent {
                 return unexecutedToolCall ? answer + "\n\n" + UNEXECUTED_TOOL_CALL_NOTICE : answer;
 
             } catch (IOException e) {
+                if (CancellationContext.isCancelled()) {
+                    // 主动 abort 在飞请求后，模型客户端会以 IOException 结束；这属于取消，不是失败。
+                    log.info("ReAct run cancelled while LLM call was in flight");
+                    streamRenderer.finish();
+                    appendInterruptMarker();
+                    pushStatus(budget, startNanos, "idle");
+                    return "⏹️ 已取消当前任务。";
+                }
                 log.error("LLM call failed in ReAct loop", e);
                 streamRenderer.finish();
                 return "❌ 调用 LLM 失败: " + e.getMessage();
@@ -635,6 +646,18 @@ public class Agent {
         if (!skills.isEmpty()) {
             appendConversationMessage(LlmClient.Message.user(skills), "skill_injection");
         }
+    }
+
+    /**
+     * 用户中断本轮后补一条内部标记：下一轮模型据此知道上一轮没有最终回复，
+     * 避免把“没有答复”当成任务已完成，也避免重复执行已经完成的工具调用。
+     * 该消息由 {@link InternalUserMessages#isInternal} 排除在用户轮次和摘要之外。
+     */
+    private void appendInterruptMarker() {
+        appendConversationMessage(LlmClient.Message.user(
+                InternalUserMessages.INTERRUPT_MARKER
+                        + " 用户中断了本轮任务。本轮没有生成最终回复；上文里已经完成的工具结果仍然有效。"
+                        + "用户的下一条消息可能需要从这里继续。"), "interrupt_marker");
     }
 
     private String buildExternalContext() {

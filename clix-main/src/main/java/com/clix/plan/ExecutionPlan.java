@@ -228,6 +228,25 @@ public class ExecutionPlan {
     }
 
     /**
+     * 取消时收尾未完成的任务：正在跑的标失败，未开始的标跳过，已完成的保持原样。
+     * 让计划对象在丢弃前仍有一份自洽的状态，便于审计和测试断言。
+     */
+    public void cancelRemaining(String reason) {
+        String message = reason == null || reason.isBlank() ? "用户取消" : reason;
+        for (String id : orderedIds()) {
+            Task task = tasks.get(id);
+            if (task == null) {
+                continue;
+            }
+            if (task.getStatus() == Task.TaskStatus.RUNNING) {
+                task.markFailed(message);
+            } else if (task.getStatus() == Task.TaskStatus.PENDING) {
+                task.markSkipped();
+            }
+        }
+    }
+
+    /**
      * 可视化计划
      */
     public String visualize() {

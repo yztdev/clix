@@ -279,6 +279,7 @@ public class AgentOrchestrator {
         while (true) {
             if (CancellationContext.isCancelled()) {
                 observation.runExitReason = RunExitReason.CANCELLED;
+                recordRunCancelled(steps);
                 return "⏹️ 已取消当前多 Agent 任务。";
             }
             List<ExecutionStep> executable = getExecutableSteps(steps);
@@ -335,6 +336,30 @@ public class AgentOrchestrator {
                 LlmClient.Message.assistant(finalResult));
 
         return finalResult;
+    }
+
+    /**
+     * 取消时把步骤状态留在会话记录里：Team 的步骤列表只在内存中，
+     * 不写这一条的话 ledger 里看不到任何“被取消”的终态。
+     */
+    private void recordRunCancelled(List<ExecutionStep> steps) {
+        List<String> completed = new ArrayList<>();
+        List<String> failed = new ArrayList<>();
+        List<String> pending = new ArrayList<>();
+        for (ExecutionStep step : steps) {
+            switch (step.status()) {
+                case COMPLETED -> completed.add(step.id());
+                case FAILED -> failed.add(step.id());
+                case PENDING -> pending.add(step.id());
+                default -> {
+                    // RUNNING 在取消收尾后不应再出现
+                }
+            }
+        }
+        conversationLedger.appendEvent("run_cancelled", "team", "orchestrator", "during_execution",
+                Map.of("completed", List.copyOf(completed),
+                        "failed", List.copyOf(failed),
+                        "pending", List.copyOf(pending)));
     }
 
     /**

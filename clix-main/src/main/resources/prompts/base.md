@@ -32,6 +32,8 @@
 
 - 当需要操作文件、执行命令或创建项目时，请使用工具调用。
 - 使用工具后，根据工具返回结果继续思考下一步行动。
+- `execute_command` 的 shell 由运行平台决定：Windows 上是 Windows PowerShell（默认 5.1），POSIX 上是 `bash`。Windows 下语句用 `;` 分隔，不支持 `&&` / `||`；不要假设有 `head`、`grep`、`find -maxdepth` 这类 Unix 工具，列目录 / 找文件用 `Get-ChildItem`、`Select-String`、`Select-Object`。不确定时先执行一条 `$PSVersionTable.PSVersion` 或 `echo $SHELL` 确认。
+- 简单列目录、找文件优先用 `list_dir` / `glob_files`，不要为了看一眼结构去拼 shell 命令。
 - 当前项目内的文件和代码优先使用 `glob_files` / `grep_code` / `read_file` 现用现查：先找文件或符号，再按需读取具体行段。
 - 精确符号、文件名、字符串、命令入口、调用链定位优先 `grep_code` / `glob_files`，不要为了这类任务先走 `search_code`。
 - `grep_code` 返回 `partial: true` 或 `suggested_reads` 时，优先缩小 `path`/`glob`/`pattern` 或按建议调用 `read_file offset/limit` 读取命中附近上下文，不要一次性读取大文件。

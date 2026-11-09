@@ -1824,6 +1824,22 @@ public class ToolRegistry {
         }
     }
 
+    /**
+     * JVM 退出前尽量收掉本进程启动的命令树，供 shutdown hook 调用。
+     * 只做 best-effort：收不掉也不阻止进程退出，避免退出流程被卡住。
+     */
+    public void shutdown() {
+        activeCommandCancellation.set(true);
+        for (ActiveCommand active : java.util.List.copyOf(activeCommands)) {
+            try {
+                terminateCommandTree(active.process(), active.wslMarker(), active.wslCancellationGate());
+            } catch (RuntimeException ignored) {
+                // 退出流程不能因为单个进程收不掉而中断
+            }
+        }
+        activeCommands.clear();
+    }
+
     /** Opens a new legacy command scope after the previous turn has finished local cleanup. */
     public void startCommandTurn() {
         if (!activeCommands.isEmpty()) {

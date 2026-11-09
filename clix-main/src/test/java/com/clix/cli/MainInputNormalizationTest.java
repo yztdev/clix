@@ -357,6 +357,14 @@ class MainInputNormalizationTest {
         assertFalse(Main.readEscCancel(null));
     }
 
+    @Test
+    void taskCtrlCWindowRequiresASecondPressCloseToTheFirst() {
+        long now = 1_000_000_000L;
+        assertFalse(Main.shouldForceExit(0L, now), "第一次 Ctrl+C 只取消，不退出");
+        assertTrue(Main.shouldForceExit(now - 500_000_000L, now), "2 秒内的第二次应强制退出");
+        assertFalse(Main.shouldForceExit(now - 3_000_000_000L, now), "超过窗口后重新从取消开始");
+    }
+
     private static void restoreProperty(String key, String value) {
         if (value == null) {
             System.clearProperty(key);
